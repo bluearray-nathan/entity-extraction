@@ -3,7 +3,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-# Note: webdriver_manager is removed to prevent version conflicts
+# webdriver_manager removed for Cloud compatibility
 from google.cloud import language_v1
 from google.oauth2 import service_account
 from google import genai
@@ -32,7 +32,6 @@ client = None
 if "gemini_api_key" in st.secrets:
     try:
         raw_secret = st.secrets["gemini_api_key"]
-        # Robust key extraction
         api_key_string = raw_secret if isinstance(raw_secret, str) else raw_secret.get("gemini_api_key") or raw_secret.get("api_key")
         
         if not api_key_string:
@@ -57,10 +56,8 @@ def get_driver():
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     
-    # CRITICAL FIX: Explicitly use the system-installed binary
+    # Explicitly use system binaries for Streamlit Cloud
     chrome_options.binary_location = "/usr/bin/chromium"
-
-    # CRITICAL FIX: Explicitly use the system-installed driver
     service = Service("/usr/bin/chromedriver")
     
     driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -75,14 +72,10 @@ def scrape_with_selenium(url, exclude_phrases=None):
     try:
         driver = get_driver()
         driver.get(url)
+        time.sleep(2) # Wait for JS
         
-        # Small wait for JS to settle
-        time.sleep(2) 
-        
-        # Get the full text of the body
         full_text = driver.find_element(By.TAG_NAME, "body").text
         
-        # The "Black Box" Cleaner
         if exclude_phrases:
             for phrase in exclude_phrases:
                 phrase = phrase.strip()
@@ -97,8 +90,7 @@ def scrape_with_selenium(url, exclude_phrases=None):
 def analyze_entities(text):
     """Google NLP Entity Extraction"""
     try:
-        # Cap at 100k chars for NLP API safety
-        nlp_text = text[:100000] 
+        nlp_text = text[:100000] # Cap for API limits
         
         document = language_v1.Document(content=nlp_text, type_=language_v1.Document.Type.PLAIN_TEXT)
         response = nlp_client.analyze_entities(request={'document': document})
@@ -107,7 +99,10 @@ def analyze_entities(text):
         if not sorted_entities: return None, []
         
         main = {"name": sorted_entities[0].name, "score": sorted_entities[0].salience}
-        subs = [e.name for e in sorted_entities[1:10]] # Grab top 10
+        
+        # CHANGED: Capture score for sub-entities too
+        subs = [{"name": e.name, "score": e.salience} for e in sorted_entities[1:10]]
+        
         return main, subs
     except Exception as e:
         st.error(f"NLP API Error: {e}")
@@ -115,11 +110,15 @@ def analyze_entities(text):
 
 def llm_audit_gemini(url, main_entity, sub_entities, model_name):
     """Gemini Audit"""
+    
+    # Prepare list for prompt (just names are enough for context, or add scores if you want)
+    sub_list_str = ", ".join([s['name'] for s in sub_entities])
+    
     prompt = f"""
     You are a technical SEO Auditor.
     URL: {url}
     Main Entity Detected: "{main_entity['name']}" (Salience Score: {main_entity['score']:.2f})
-    Sub-Entities Detected: {", ".join(sub_entities)}
+    Sub-Entities Detected: {sub_list_str}
     
     Task: Audit if the content actually focuses on the user's search intent.
     
@@ -140,14 +139,11 @@ def llm_audit_gemini(url, main_entity, sub_entities, model_name):
         return {"verdict": "Error", "reasoning": str(e), "recommendation": "Check Model"}
 
 # --- 3. THE UI ---
-st.set_page_config(page_title="Selenium Entity Auditor", layout="wide")
+st.set_page_config(page_title="Entity Auditor", layout="wide")
 st.title("🚀 Selenium + Gemini Entity Auditor")
 
-# SIDEBAR
 with st.sidebar:
     st.header("⚙️ Settings")
-    
-    # Model Selection
     model_options = ["gemini-1.5-flash"]
     try:
         if client:
@@ -156,15 +152,10 @@ with st.sidebar:
             model_options.sort(reverse=True)
     except: pass
     selected_model = st.selectbox("Gemini Model", model_options)
-
     st.divider()
-    
-    # The Excluder Box
     st.subheader("🧹 Cleaner")
-    st.info("Paste junk text here (headers, cookie banners) to remove it from analysis.")
     exclude_text = st.text_area("Phrases to Remove:", height=150)
 
-# MAIN INPUT
 urls_input = st.text_area("Enter URLs (one per line):", height=100)
 
 if st.button("Run Audit", type="primary"):
@@ -172,7 +163,6 @@ if st.button("Run Audit", type="primary"):
         st.warning("Enter a URL first.")
     else:
         urls = urls_input.strip().split('\n')
-        # Prepare exclude list
         excludes = exclude_text.split('\n') if exclude_text else []
         
         results = []
@@ -183,33 +173,36 @@ if st.button("Run Audit", type="primary"):
             url = url.strip()
             if not url: continue
             
-            status.text(f"Scraping with Selenium: {url}...")
+            status.text(f"Processing: {url}...")
             
-            # 1. SCRAPE
+            # 1. Scrape
             text = scrape_with_selenium(url, exclude_phrases=excludes)
             
-            # Show preview
             with st.expander(f"📄 View Scraped Text ({len(text)} chars)"):
                 st.text_area("Full Body Text", text, height=300)
             
             if "ERROR" in text or len(text) < 50:
-                results.append({"URL": url, "Verdict": "Fail", "Reasoning": "Scrape failed or empty", "Action": "Check URL"})
+                results.append({"URL": url, "Verdict": "Fail", "Reasoning": "Scrape failed", "Action": "Check URL"})
                 continue
 
-            # 2. ANALYZE
-            status.text(f"Analyzing entities for: {url}...")
+            # 2. NLP
             main_ent, sub_ents = analyze_entities(text)
             
             if not main_ent:
-                results.append({"URL": url, "Verdict": "Error", "Reasoning": "No entities found", "Action": "Check content length"})
+                results.append({"URL": url, "Verdict": "Error", "Reasoning": "No entities", "Action": "Check content"})
                 continue
                 
-            # 3. AUDIT
+            # 3. Audit
             audit = llm_audit_gemini(url, main_ent, sub_ents, selected_model)
+            
+            # 4. Format Output for Table
+            # Create a nice string: "EntityName (0.15), OtherName (0.12)"
+            formatted_subs = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_ents])
             
             results.append({
                 "URL": url,
                 "Main Entity": f"{main_ent['name']} ({main_ent['score']:.2f})",
+                "Sub Entities": formatted_subs, # <--- Now includes scores!
                 "Verdict": audit.get("verdict"),
                 "Reasoning": audit.get("reasoning"),
                 "Action": audit.get("recommendation")
@@ -219,7 +212,6 @@ if st.button("Run Audit", type="primary"):
             
         status.success("Done!")
         
-        # Display Results
         df = pd.DataFrame(results)
         def color_verdict(val):
             color = 'red' if val in ['Fail', 'Error'] else 'green' if val == 'Pass' else 'orange'
