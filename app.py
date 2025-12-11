@@ -60,10 +60,11 @@ else:
 
 # --- 2. CORE FUNCTIONS ---
 
-def scrape_body_text(url, exclude_selectors=None):
+def scrape_body_text(url, exclude_selectors=None, exclude_phrases=None):
     """
-    Scrapes visible text from a URL with stealth headers.
-    Allows removing specific elements via CSS selectors (e.g. '.navbar').
+    Scrapes visible text and supports TWO types of cleaning:
+    1. CSS Selectors (removes HTML tags before getting text)
+    2. Text Phrases (removes specific strings after getting text)
     """
     try:
         headers = {
@@ -87,21 +88,29 @@ def scrape_body_text(url, exclude_selectors=None):
         for element in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "iframe"]):
             element.extract()
 
-        # 2. Custom User Exclusion (The new feature)
+        # 2. CSS Exclusion (Technical)
         if exclude_selectors:
             for selector in exclude_selectors:
                 selector = selector.strip()
                 if not selector: continue
                 try:
-                    # Select matches and remove them
                     found_elements = soup.select(selector)
                     for el in found_elements:
                         el.extract()
                 except Exception as e:
-                    # Ignore invalid selectors so the rest of the scrape still works
                     print(f"Invalid selector '{selector}': {e}")
             
+        # Get the raw text
         text = soup.get_text(separator=' ')
+        
+        # 3. Text Phrase Exclusion (The "Black Box" approach)
+        if exclude_phrases:
+            for phrase in exclude_phrases:
+                phrase = phrase.strip()
+                if phrase:
+                    text = text.replace(phrase, "")
+
+        # Final whitespace cleanup
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         clean_text = ' '.join(chunk for chunk in chunks if chunk)
@@ -186,14 +195,22 @@ with st.sidebar:
     selected_model = st.selectbox("Select Gemini Model:", available_models, index=0)
     
     st.markdown("---")
+    st.subheader("🧹 Cleaning Tools")
     
-    # NEW: Class Excluder Input
-    st.subheader("🧹 Scraping Cleaner")
-    st.info("Remove specific site elements (e.g. headers, cookie banners) to improve accuracy.")
-    exclude_input = st.text_input(
+    # Option 1: CSS Selectors (Technical)
+    exclude_input_css = st.text_input(
         "Exclude CSS Selectors:", 
-        placeholder=".navbar, #cookie-banner, .login-header",
-        help="Enter classes (.) or IDs (#) separated by commas. These parts of the page will be deleted before analysis."
+        placeholder=".navbar, #cookie-banner",
+        help="Remove HTML elements by Class or ID."
+    )
+    
+    # Option 2: Text Phrases (Simple) -> ADDED THIS
+    st.markdown("**Exclude Specific Text:**")
+    exclude_input_text = st.text_area(
+        "Paste text phrases to remove (one per line):",
+        placeholder="Breakdown Cover | RAC\nSkip to content\nCookie Policy",
+        height=150,
+        help="Any text pasted here will be deleted from the page content before analysis."
     )
 
 urls_input = st.text_area("Enter URLs (one per line):", height=150)
@@ -204,8 +221,9 @@ if st.button("Run Audit", type="primary"):
     else:
         urls = urls_input.strip().split('\n')
         
-        # Parse user exclusion list
-        exclude_list = [x.strip() for x in exclude_input.split(',')] if exclude_input else []
+        # Parse user inputs
+        exclude_list_css = [x.strip() for x in exclude_input_css.split(',')] if exclude_input_css else []
+        exclude_list_text = exclude_input_text.split('\n') if exclude_input_text else []
         
         results = []
         progress_bar = st.progress(0)
@@ -217,8 +235,8 @@ if st.button("Run Audit", type="primary"):
             
             status_text.text(f"Processing: {url}")
             
-            # 1. Scrape (Passing the exclusion list)
-            text = scrape_body_text(url, exclude_selectors=exclude_list)
+            # 1. Scrape (Passing BOTH exclusion lists)
+            text = scrape_body_text(url, exclude_selectors=exclude_list_css, exclude_phrases=exclude_list_text)
             
             with st.expander(f"🕵️‍♂️ View Scraped Text for: {url}"):
                 if text and "ERROR" in text:
