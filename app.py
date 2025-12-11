@@ -115,7 +115,9 @@ def scrape_body_text(url, exclude_selectors=None, exclude_phrases=None):
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         clean_text = ' '.join(chunk for chunk in chunks if chunk)
         
-        return clean_text[:8000]
+        # CHANGE IS HERE: Removed [:8000] limit. Sends EVERYTHING.
+        return clean_text 
+        
     except Exception as e:
         return f"ERROR: {str(e)}"
 
@@ -242,7 +244,7 @@ if st.button("Run Audit", type="primary"):
                 if text and "ERROR" in text:
                     st.error(text)
                 else:
-                    st.text(text[:1000] + "..." if text else "No text found")
+                    st.text(text[:2000] + "..." if len(text) > 2000 else text) # Show first 2000 chars in UI preview
             
             if not text or "ERROR" in text:
                 results.append({"URL": url, "Status": "Scrape Blocked", "Verdict": "Fail", "Reasoning": text, "Action": "Check Headers"})
