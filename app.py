@@ -24,7 +24,6 @@ else:
     st.stop()
 
 # B. Google Gemini API (API Key)
-# We initialize this early so we can fetch model lists
 client = None
 if "gemini_api_key" in st.secrets:
     try:
@@ -50,7 +49,6 @@ if "gemini_api_key" in st.secrets:
             st.error("❌ Error: Found [gemini_api_key] but no valid string key inside.")
             st.stop()
 
-        # Initialize the Client
         client = genai.Client(api_key=api_key_string)
         
     except Exception as e:
@@ -62,8 +60,11 @@ else:
 
 # --- 2. CORE FUNCTIONS ---
 
-def scrape_body_text(url):
-    """Scrapes visible text from a URL with stealth headers."""
+def scrape_body_text(url, exclude_selectors=None):
+    """
+    Scrapes visible text from a URL with stealth headers.
+    Allows removing specific elements via CSS selectors (e.g. '.navbar').
+    """
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -82,8 +83,23 @@ def scrape_body_text(url):
 
         soup = BeautifulSoup(response.content, 'html.parser')
         
+        # 1. Standard Cleanup (Always remove these)
         for element in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "iframe"]):
             element.extract()
+
+        # 2. Custom User Exclusion (The new feature)
+        if exclude_selectors:
+            for selector in exclude_selectors:
+                selector = selector.strip()
+                if not selector: continue
+                try:
+                    # Select matches and remove them
+                    found_elements = soup.select(selector)
+                    for el in found_elements:
+                        el.extract()
+                except Exception as e:
+                    # Ignore invalid selectors so the rest of the scrape still works
+                    print(f"Invalid selector '{selector}': {e}")
             
         text = soup.get_text(separator=' ')
         lines = (line.strip() for line in text.splitlines())
@@ -125,7 +141,10 @@ def llm_audit_gemini(url, main_entity_data, sub_entities, model_name):
     Main Entity: "{main_entity_data['name']}" (Score: {main_entity_data['score']:.2f})
     Sub-Entities: {", ".join(sub_entities)}
     
-    Task: Analyze if the content is focused on the correct topic.
+    Task: Audit content focus.
+    
+    RULE: If 'Main Entity' is generic (e.g. 'Member', 'Login', 'Home', Brand Name), ignore it and check if Sub-Entities match the URL topic.
+    
     Return ONLY JSON:
     {{
         "verdict": "Pass" or "Review Needed",
@@ -135,7 +154,6 @@ def llm_audit_gemini(url, main_entity_data, sub_entities, model_name):
     """
     
     try:
-        # Use the model selected by the user
         response = client.models.generate_content(
             model=model_name, 
             contents=prompt,
@@ -152,23 +170,31 @@ st.set_page_config(page_title="Entity Auditor", layout="wide")
 
 st.title("🔹 Google NLP + Gemini Entity Auditor")
 
-# --- AUTO-DETECT AVAILABLE MODELS ---
-available_models = ["gemini-1.5-flash"] # Default fallback
-try:
-    if client:
-        # Fetch list of models from Google
-        models = client.models.list()
-        # Filter for models that support 'generateContent' and are 'gemini'
-        available_models = [m.name for m in models if "gemini" in m.name and "vision" not in m.name]
-        available_models.sort(reverse=True) # Put newest versions first
-except Exception as e:
-    st.warning(f"Could not fetch model list: {e}")
-
-# Sidebar Selection
+# --- SIDEBAR SETTINGS ---
 with st.sidebar:
-    st.header("⚙️ Settings")
+    st.header("⚙️ Configuration")
+    
+    # Model Selector
+    available_models = ["gemini-1.5-flash"]
+    try:
+        if client:
+            models = client.models.list()
+            available_models = [m.name for m in models if "gemini" in m.name and "vision" not in m.name]
+            available_models.sort(reverse=True)
+    except:
+        pass
     selected_model = st.selectbox("Select Gemini Model:", available_models, index=0)
-    st.caption(f"Using: {selected_model}")
+    
+    st.markdown("---")
+    
+    # NEW: Class Excluder Input
+    st.subheader("🧹 Scraping Cleaner")
+    st.info("Remove specific site elements (e.g. headers, cookie banners) to improve accuracy.")
+    exclude_input = st.text_input(
+        "Exclude CSS Selectors:", 
+        placeholder=".navbar, #cookie-banner, .login-header",
+        help="Enter classes (.) or IDs (#) separated by commas. These parts of the page will be deleted before analysis."
+    )
 
 urls_input = st.text_area("Enter URLs (one per line):", height=150)
 
@@ -177,8 +203,11 @@ if st.button("Run Audit", type="primary"):
         st.warning("Please enter at least one URL.")
     else:
         urls = urls_input.strip().split('\n')
-        results = []
         
+        # Parse user exclusion list
+        exclude_list = [x.strip() for x in exclude_input.split(',')] if exclude_input else []
+        
+        results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -188,8 +217,8 @@ if st.button("Run Audit", type="primary"):
             
             status_text.text(f"Processing: {url}")
             
-            # 1. Scrape
-            text = scrape_body_text(url)
+            # 1. Scrape (Passing the exclusion list)
+            text = scrape_body_text(url, exclude_selectors=exclude_list)
             
             with st.expander(f"🕵️‍♂️ View Scraped Text for: {url}"):
                 if text and "ERROR" in text:
@@ -204,10 +233,10 @@ if st.button("Run Audit", type="primary"):
             # 2. NLP
             main_entity, sub_entities = analyze_entities(text)
             if not main_entity:
-                results.append({"URL": url, "Status": "NLP Failed", "Verdict": "Fail", "Reasoning": "See Error Above", "Action": "Check API"})
+                results.append({"URL": url, "Status": "NLP Failed", "Verdict": "Fail", "Reasoning": "API Error", "Action": "Check API Console"})
                 continue
             
-            # 3. Gemini Audit (Passing the selected model)
+            # 3. Gemini Audit
             audit = llm_audit_gemini(url, main_entity, sub_entities, selected_model)
             
             results.append({
