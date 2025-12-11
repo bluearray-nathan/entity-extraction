@@ -11,10 +11,14 @@ import json
 # --- 1. CONFIGURATION & AUTH ---
 
 # A. Google Cloud NLP API (Service Account)
-# This handles the Entity Extraction
 if "gcp_service_account" in st.secrets:
     try:
-        service_account_info = json.loads(st.secrets["gcp_service_account"])
+        # --- FIX APPLIED HERE ---
+        # Streamlit automatically converts the TOML secret into a dictionary (AttrDict).
+        # We generally do not need json.loads() unless you stored it as a raw string.
+        # We convert it to a standard dict to ensure compatibility with the Google library.
+        service_account_info = dict(st.secrets["gcp_service_account"])
+        
         credentials = service_account.Credentials.from_service_account_info(service_account_info)
         nlp_client = language_v1.LanguageServiceClient(credentials=credentials)
     except Exception as e:
@@ -25,7 +29,6 @@ else:
     st.stop()
 
 # B. Google Gemini API (API Key)
-# This handles the Auditing/Reasoning
 if "gemini_api_key" in st.secrets:
     try:
         # Initialize the new GenAI Client
@@ -116,7 +119,6 @@ def llm_audit_gemini(url, main_entity_data, sub_entities):
     """
     
     try:
-        # UPDATED: New SDK syntax
         response = client.models.generate_content(
             model='gemini-1.5-flash',
             contents=prompt,
