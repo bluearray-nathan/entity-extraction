@@ -1,6 +1,6 @@
 streamlit
 google-cloud-language
-google-generative-ai>=0.8.0
+google-genai
 pandas
 beautifulsoup4
 requests
