@@ -13,7 +13,6 @@ import json
 # A. Google Cloud NLP API (Service Account)
 if "gcp_service_account" in st.secrets:
     try:
-        # Force conversion to a standard Python dictionary
         service_account_info = dict(st.secrets["gcp_service_account"])
         credentials = service_account.Credentials.from_service_account_info(service_account_info)
         nlp_client = language_v1.LanguageServiceClient(credentials=credentials)
@@ -25,12 +24,14 @@ else:
     st.stop()
 
 # B. Google Gemini API (API Key)
+# We initialize this early so we can fetch model lists
+client = None
 if "gemini_api_key" in st.secrets:
     try:
         raw_secret = st.secrets["gemini_api_key"]
         api_key_string = None
         
-        # LOGIC: Extract key string from potential dictionary structure
+        # LOGIC: Extract key string
         if isinstance(raw_secret, str):
             api_key_string = raw_secret
         else:
@@ -115,7 +116,7 @@ def analyze_entities(text):
         st.error(f"🚨 Google NLP API Error: {e}")
         return None, []
 
-def llm_audit_gemini(url, main_entity_data, sub_entities):
+def llm_audit_gemini(url, main_entity_data, sub_entities, model_name):
     """Asks Gemini to audit the entity alignment."""
     
     prompt = f"""
@@ -134,9 +135,9 @@ def llm_audit_gemini(url, main_entity_data, sub_entities):
     """
     
     try:
-        # --- FIX: Use specific model version ID to avoid 404s ---
+        # Use the model selected by the user
         response = client.models.generate_content(
-            model='gemini-1.5-flash-001', 
+            model=model_name, 
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"
@@ -150,7 +151,24 @@ def llm_audit_gemini(url, main_entity_data, sub_entities):
 st.set_page_config(page_title="Entity Auditor", layout="wide")
 
 st.title("🔹 Google NLP + Gemini Entity Auditor")
-st.markdown("Extract entities via Google NLP -> Audit alignment via LLM")
+
+# --- AUTO-DETECT AVAILABLE MODELS ---
+available_models = ["gemini-1.5-flash"] # Default fallback
+try:
+    if client:
+        # Fetch list of models from Google
+        models = client.models.list()
+        # Filter for models that support 'generateContent' and are 'gemini'
+        available_models = [m.name for m in models if "gemini" in m.name and "vision" not in m.name]
+        available_models.sort(reverse=True) # Put newest versions first
+except Exception as e:
+    st.warning(f"Could not fetch model list: {e}")
+
+# Sidebar Selection
+with st.sidebar:
+    st.header("⚙️ Settings")
+    selected_model = st.selectbox("Select Gemini Model:", available_models, index=0)
+    st.caption(f"Using: {selected_model}")
 
 urls_input = st.text_area("Enter URLs (one per line):", height=150)
 
@@ -189,8 +207,8 @@ if st.button("Run Audit", type="primary"):
                 results.append({"URL": url, "Status": "NLP Failed", "Verdict": "Fail", "Reasoning": "See Error Above", "Action": "Check API"})
                 continue
             
-            # 3. Gemini Audit
-            audit = llm_audit_gemini(url, main_entity, sub_entities)
+            # 3. Gemini Audit (Passing the selected model)
+            audit = llm_audit_gemini(url, main_entity, sub_entities, selected_model)
             
             results.append({
                 "URL": url,
