@@ -1,6 +1,7 @@
 streamlit
+selenium
+webdriver-manager
 google-cloud-language
 google-genai
-pandas
 beautifulsoup4
-requests
+pandas
