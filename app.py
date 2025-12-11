@@ -15,7 +15,7 @@ import time
 st.set_page_config(page_title="Entity Interpreter", layout="wide")
 
 # HARDCODED MODEL VERSION
-ACTIVE_GEMINI_MODEL = "gemini-1.5-flash"
+ACTIVE_GEMINI_MODEL = "gemini-2.5-flash"
 
 # --- 2. AUTHENTICATION ---
 
