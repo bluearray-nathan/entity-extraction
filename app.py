@@ -13,12 +13,8 @@ import json
 # A. Google Cloud NLP API (Service Account)
 if "gcp_service_account" in st.secrets:
     try:
-        # --- FIX APPLIED HERE ---
-        # Streamlit automatically converts the TOML secret into a dictionary (AttrDict).
-        # We generally do not need json.loads() unless you stored it as a raw string.
-        # We convert it to a standard dict to ensure compatibility with the Google library.
+        # Streamlit reads the [gcp_service_account] section as a dictionary
         service_account_info = dict(st.secrets["gcp_service_account"])
-        
         credentials = service_account.Credentials.from_service_account_info(service_account_info)
         nlp_client = language_v1.LanguageServiceClient(credentials=credentials)
     except Exception as e:
@@ -31,8 +27,23 @@ else:
 # B. Google Gemini API (API Key)
 if "gemini_api_key" in st.secrets:
     try:
-        # Initialize the new GenAI Client
-        client = genai.Client(api_key=st.secrets["gemini_api_key"])
+        # RETRIEVAL FIX: Check if the secret is nested inside a section
+        raw_secret = st.secrets["gemini_api_key"]
+        
+        if isinstance(raw_secret, (dict, type(st.secrets))):
+            # If it's a dictionary (because of the [header] in secrets.toml),
+            # we need to pull the key string out of it.
+            api_key_string = raw_secret.get("gemini_api_key")
+            if not api_key_string:
+                st.error("Found [gemini_api_key] section in secrets, but the key inside is missing.")
+                st.stop()
+        else:
+            # It's already a string (flat structure)
+            api_key_string = raw_secret
+
+        # Initialize the Client with the actual string
+        client = genai.Client(api_key=api_key_string)
+        
     except Exception as e:
         st.error(f"Error initializing Gemini: {e}")
         st.stop()
