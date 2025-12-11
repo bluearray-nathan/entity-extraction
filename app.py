@@ -101,7 +101,7 @@ def analyze_entities(text):
 
 def get_gemini_explanation(url, main_entity, text_sample, model_name):
     """
-    NEW FUNCTION: Asks Gemini to explain WHY the NLP API picked this entity.
+    Asks Gemini to explain WHY the NLP API picked this entity.
     """
     prompt = f"""
     You are an expert in Google's Natural Language Processing (NLP) API.
@@ -116,9 +116,9 @@ def get_gemini_explanation(url, main_entity, text_sample, model_name):
     Task: Explain WHY the NLP algorithm chose "{main_entity['name']}" as the most important concept.
     
     Analyze:
-    1. Grammatical Subject: Is "{main_entity['name']}" the 'doer' in most sentences (e.g. 'Driver needs...')?
+    1. Grammatical Subject: Is "{main_entity['name']}" the 'doer' in most sentences?
     2. Structural Prominence: Is it in headings or navigation links?
-    3. Repetition/Lemmatization: Are there related words (e.g. driving, drive, drivers) that grouped together?
+    3. Repetition/Lemmatization: Are there related words that grouped together?
     
     Output JSON ONLY:
     {{
@@ -190,7 +190,7 @@ if st.button("Analyze & Explain", type="primary"):
                 results.append({"URL": url, "Main Entity": "None", "Explanation": "No entities found"})
                 continue
                 
-            # 3. Gemini Interpretation (Passing the first 3000 chars of text for context)
+            # 3. Gemini Interpretation (Passing text context)
             explanation_data = get_gemini_explanation(url, main_ent, text[:3000], selected_model)
             
             formatted_subs = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_ents])
@@ -207,4 +207,22 @@ if st.button("Analyze & Explain", type="primary"):
             
         status.success("Done!")
         
-        st.dataframe(pd.DataFrame(results), use_container_width=True)
+        # --- DATA DISPLAY & EXPORT ---
+        df = pd.DataFrame(results)
+        
+        # 1. Create columns for Table vs Download button
+        col1, col2 = st.columns([4, 1])
+        
+        with col2:
+            # Convert DF to CSV
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download CSV",
+                data=csv,
+                file_name="entity_analysis_results.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        # 2. Display the styled table
+        st.dataframe(df, use_container_width=True)
