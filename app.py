@@ -11,7 +11,10 @@ import pandas as pd
 import json
 import time
 
-# --- 1. AUTHENTICATION & SETUP ---
+# --- 1. CONFIGURATION ---
+st.set_page_config(page_title="Entity Interpreter", layout="wide")
+
+# --- 2. AUTHENTICATION & SETUP ---
 
 # A. Google Cloud NLP
 if "gcp_service_account" in st.secrets:
@@ -62,7 +65,11 @@ def get_driver():
     driver = webdriver.Chrome(service=service, options=chrome_options)
     return driver
 
-# --- 2. CORE FUNCTIONS ---
+# --- 3. SESSION STATE (The Fix for the Refresh Issue) ---
+if 'results_df' not in st.session_state:
+    st.session_state.results_df = None
+
+# --- 4. CORE FUNCTIONS ---
 
 def scrape_with_selenium(url, exclude_phrases=None):
     try:
@@ -100,9 +107,6 @@ def analyze_entities(text):
         return None, []
 
 def get_gemini_explanation(url, main_entity, text_sample, model_name):
-    """
-    Asks Gemini to explain WHY the NLP API picked this entity.
-    """
     prompt = f"""
     You are an expert in Google's Natural Language Processing (NLP) API.
     
@@ -136,8 +140,7 @@ def get_gemini_explanation(url, main_entity, text_sample, model_name):
     except Exception as e:
         return {"context": "Error", "explanation": str(e)}
 
-# --- 3. THE UI ---
-st.set_page_config(page_title="Entity Interpreter", layout="wide")
+# --- 5. THE UI ---
 st.title("🧠 Entity Analysis Interpreter")
 
 with st.sidebar:
@@ -156,6 +159,7 @@ with st.sidebar:
 
 urls_input = st.text_area("Enter URLs (one per line):", height=100)
 
+# --- PROCESSING BLOCK ---
 if st.button("Analyze & Explain", type="primary"):
     if not urls_input:
         st.warning("Enter a URL first.")
@@ -190,7 +194,7 @@ if st.button("Analyze & Explain", type="primary"):
                 results.append({"URL": url, "Main Entity": "None", "Explanation": "No entities found"})
                 continue
                 
-            # 3. Gemini Interpretation (Passing text context)
+            # 3. Gemini Interpretation
             explanation_data = get_gemini_explanation(url, main_ent, text[:3000], selected_model)
             
             formatted_subs = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_ents])
@@ -207,22 +211,28 @@ if st.button("Analyze & Explain", type="primary"):
             
         status.success("Done!")
         
-        # --- DATA DISPLAY & EXPORT ---
-        df = pd.DataFrame(results)
+        # SAVE TO SESSION STATE
+        st.session_state.results_df = pd.DataFrame(results)
+
+# --- RESULT DISPLAY BLOCK (Outside the button loop) ---
+# This checks if data exists in the "memory" of the app
+if st.session_state.results_df is not None:
+    st.divider()
+    
+    # 1. Create columns for Table vs Download button
+    col1, col2 = st.columns([4, 1])
+    
+    with col2:
+        # Convert DF to CSV
+        csv = st.session_state.results_df.to_csv(index=False).encode('utf-8')
         
-        # 1. Create columns for Table vs Download button
-        col1, col2 = st.columns([4, 1])
-        
-        with col2:
-            # Convert DF to CSV
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download CSV",
-                data=csv,
-                file_name="entity_analysis_results.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-        
-        # 2. Display the styled table
-        st.dataframe(df, use_container_width=True)
+        st.download_button(
+            label="📥 Download CSV",
+            data=csv,
+            file_name="entity_analysis_results.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    
+    # 2. Display the styled table
+    st.dataframe(st.session_state.results_df, use_container_width=True)
