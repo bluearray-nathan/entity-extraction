@@ -14,11 +14,10 @@ import time
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Entity Interpreter", layout="wide")
 
-# HARDCODED MODEL VERSION (No dropdown)
-# You can change this to "gemini-1.5-pro" if you need deeper reasoning
-ACTIVE_GEMINI_MODEL = "gemini-2.5-flash"
+# HARDCODED MODEL VERSION
+ACTIVE_GEMINI_MODEL = "gemini-1.5-flash"
 
-# --- 2. AUTHENTICATION & SETUP ---
+# --- 2. AUTHENTICATION ---
 
 # A. Google Cloud NLP
 if "gcp_service_account" in st.secrets:
@@ -83,9 +82,7 @@ def scrape_with_selenium(url, exclude_phrases=None):
         
         full_text = driver.find_element(By.TAG_NAME, "body").text
         
-        # CLEANING LOGIC:
-        # Replaces exact string matches with empty space.
-        # Does NOT use regex, so it is safe for specific phrases containing keywords.
+        # CLEANING LOGIC (Comma Separated)
         if exclude_phrases:
             for phrase in exclude_phrases:
                 phrase = phrase.strip()
@@ -96,17 +93,50 @@ def scrape_with_selenium(url, exclude_phrases=None):
     except Exception as e:
         return f"ERROR: {str(e)}"
 
+def deduplicate_entities(entities):
+    """
+    NEW FUNCTION: Merges entities that are functionally the same.
+    e.g. "Tariff" (0.05) + "tariff" (0.02) -> "Tariff" (0.07)
+    """
+    merged = {}
+    
+    for e in entities:
+        # 1. Normalize name (lowercase + remove 's' to handle simple plurals)
+        # Note: This is a simple heuristic. 'Energy Tariffs' -> 'energy tariff'
+        clean_name = e.name.lower().rstrip('s')
+        
+        if clean_name in merged:
+            # Add the scores together
+            merged[clean_name]['score'] += e.salience
+            
+            # Prefer Title Case if the current version is cleaner
+            # e.g. If we have "tariff" and find "Tariff", swap to "Tariff"
+            if e.name[0].isupper() and not merged[clean_name]['name'][0].isupper():
+                merged[clean_name]['name'] = e.name
+        else:
+            merged[clean_name] = {
+                'name': e.name,
+                'score': e.salience
+            }
+            
+    # Convert dict back to list and sort by the NEW combined score
+    sorted_merged = sorted(merged.values(), key=lambda x: x['score'], reverse=True)
+    return sorted_merged
+
 def analyze_entities(text):
     try:
         nlp_text = text[:100000]
         document = language_v1.Document(content=nlp_text, type_=language_v1.Document.Type.PLAIN_TEXT)
         response = nlp_client.analyze_entities(request={'document': document})
         
-        sorted_entities = sorted(response.entities, key=lambda x: x.salience, reverse=True)
-        if not sorted_entities: return None, []
+        # 1. Run Deduplication Logic
+        cleaned_entities = deduplicate_entities(response.entities)
         
-        main = {"name": sorted_entities[0].name, "score": sorted_entities[0].salience}
-        subs = [{"name": e.name, "score": e.salience} for e in sorted_entities[1:10]]
+        if not cleaned_entities: return None, []
+        
+        # 2. Extract Main and Sub Entities from the CLEANED list
+        main = {"name": cleaned_entities[0]['name'], "score": cleaned_entities[0]['score']}
+        subs = [{"name": e['name'], "score": e['score']} for e in cleaned_entities[1:10]]
         
         return main, subs
     except Exception as e:
@@ -173,9 +203,7 @@ if st.button("Analyze & Explain", type="primary"):
     else:
         urls = urls_input.strip().split('\n')
         
-        # SPLIT BY COMMA as requested
-        # We also check if the user used newlines instead, just to be safe, 
-        # but primarily we split by comma.
+        # SPLIT BY COMMA
         raw_excludes = exclude_text.replace('\n', ',').split(',')
         excludes = [x.strip() for x in raw_excludes if x.strip()]
         
@@ -199,7 +227,7 @@ if st.button("Analyze & Explain", type="primary"):
                 results.append({"URL": url, "Main Entity": "Error", "Explanation": "Scrape Failed"})
                 continue
 
-            # 2. NLP Analysis
+            # 2. NLP Analysis (NOW DEDUPLICATED)
             main_ent, sub_ents = analyze_entities(text)
             
             if not main_ent:
@@ -226,11 +254,10 @@ if st.button("Analyze & Explain", type="primary"):
         # SAVE TO SESSION STATE
         st.session_state.results_df = pd.DataFrame(results)
 
-# --- RESULT DISPLAY BLOCK (Outside the button loop) ---
+# --- RESULT DISPLAY BLOCK ---
 if st.session_state.results_df is not None:
     st.divider()
     
-    # 1. Create columns for Table vs Download button
     col1, col2 = st.columns([4, 1])
     
     with col2:
@@ -244,5 +271,4 @@ if st.session_state.results_df is not None:
             use_container_width=True
         )
     
-    # 2. Display the styled table
     st.dataframe(st.session_state.results_df, use_container_width=True)
