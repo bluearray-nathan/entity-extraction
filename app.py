@@ -13,7 +13,7 @@ import json
 # A. Google Cloud NLP API (Service Account)
 if "gcp_service_account" in st.secrets:
     try:
-        # Streamlit reads the [gcp_service_account] section as a dictionary
+        # Force conversion to a standard Python dictionary to avoid "AttrDict" errors
         service_account_info = dict(st.secrets["gcp_service_account"])
         credentials = service_account.Credentials.from_service_account_info(service_account_info)
         nlp_client = language_v1.LanguageServiceClient(credentials=credentials)
@@ -27,21 +27,36 @@ else:
 # B. Google Gemini API (API Key)
 if "gemini_api_key" in st.secrets:
     try:
-        # RETRIEVAL FIX: Check if the secret is nested inside a section
         raw_secret = st.secrets["gemini_api_key"]
+        api_key_string = None
         
-        if isinstance(raw_secret, (dict, type(st.secrets))):
-            # If it's a dictionary (because of the [header] in secrets.toml),
-            # we need to pull the key string out of it.
-            api_key_string = raw_secret.get("gemini_api_key")
-            if not api_key_string:
-                st.error("Found [gemini_api_key] section in secrets, but the key inside is missing.")
-                st.stop()
-        else:
-            # It's already a string (flat structure)
+        # LOGIC: Check if it's already a string (flat), or a dict (nested section)
+        if isinstance(raw_secret, str):
             api_key_string = raw_secret
+        else:
+            # It's a dictionary/section. Let's look inside for the key.
+            # We convert to a standard dict first to be safe.
+            secret_dict = dict(raw_secret)
+            
+            # 1. Try exact match for the key name "gemini_api_key"
+            if "gemini_api_key" in secret_dict:
+                api_key_string = secret_dict["gemini_api_key"]
+            # 2. Try 'api_key' (common variation)
+            elif "api_key" in secret_dict:
+                api_key_string = secret_dict["api_key"]
+            # 3. Fallback: Search for ANY value starting with "AIza" (Google Keys always start with this)
+            else:
+                for v in secret_dict.values():
+                    if isinstance(v, str) and v.startswith("AIza"):
+                        api_key_string = v
+                        break
+        
+        if not api_key_string:
+            st.error("❌ Error: Found the [gemini_api_key] section, but could not find the actual key string inside.")
+            st.write("Debug info - Keys found:", list(dict(raw_secret).keys()) if not isinstance(raw_secret, str) else "None")
+            st.stop()
 
-        # Initialize the Client with the actual string
+        # Initialize the Client with the cleaned string
         client = genai.Client(api_key=api_key_string)
         
     except Exception as e:
@@ -219,7 +234,6 @@ if st.button("Run Audit", type="primary"):
                 st.dataframe(df, use_container_width=True)
         else:
             st.warning("No valid results generated.")
-
 
 
 
