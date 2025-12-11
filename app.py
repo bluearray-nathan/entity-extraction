@@ -15,7 +15,7 @@ import time
 st.set_page_config(page_title="Entity Interpreter", layout="wide")
 
 # HARDCODED MODEL VERSION
-ACTIVE_GEMINI_MODEL = "gemini-2.5-flash"
+ACTIVE_GEMINI_MODEL = "gemini-1.5-flash"
 
 # --- 2. AUTHENTICATION ---
 
@@ -95,22 +95,16 @@ def scrape_with_selenium(url, exclude_phrases=None):
 
 def deduplicate_entities(entities):
     """
-    NEW FUNCTION: Merges entities that are functionally the same.
-    e.g. "Tariff" (0.05) + "tariff" (0.02) -> "Tariff" (0.07)
+    Merges entities that are functionally the same.
     """
     merged = {}
     
     for e in entities:
-        # 1. Normalize name (lowercase + remove 's' to handle simple plurals)
-        # Note: This is a simple heuristic. 'Energy Tariffs' -> 'energy tariff'
+        # Normalize name
         clean_name = e.name.lower().rstrip('s')
         
         if clean_name in merged:
-            # Add the scores together
             merged[clean_name]['score'] += e.salience
-            
-            # Prefer Title Case if the current version is cleaner
-            # e.g. If we have "tariff" and find "Tariff", swap to "Tariff"
             if e.name[0].isupper() and not merged[clean_name]['name'][0].isupper():
                 merged[clean_name]['name'] = e.name
         else:
@@ -119,7 +113,6 @@ def deduplicate_entities(entities):
                 'score': e.salience
             }
             
-    # Convert dict back to list and sort by the NEW combined score
     sorted_merged = sorted(merged.values(), key=lambda x: x['score'], reverse=True)
     return sorted_merged
 
@@ -129,12 +122,12 @@ def analyze_entities(text):
         document = language_v1.Document(content=nlp_text, type_=language_v1.Document.Type.PLAIN_TEXT)
         response = nlp_client.analyze_entities(request={'document': document})
         
-        # 1. Run Deduplication Logic
+        # 1. Deduplicate
         cleaned_entities = deduplicate_entities(response.entities)
         
         if not cleaned_entities: return None, []
         
-        # 2. Extract Main and Sub Entities from the CLEANED list
+        # 2. Extract
         main = {"name": cleaned_entities[0]['name'], "score": cleaned_entities[0]['score']}
         subs = [{"name": e['name'], "score": e['score']} for e in cleaned_entities[1:10]]
         
@@ -203,7 +196,6 @@ if st.button("Analyze & Explain", type="primary"):
     else:
         urls = urls_input.strip().split('\n')
         
-        # SPLIT BY COMMA
         raw_excludes = exclude_text.replace('\n', ',').split(',')
         excludes = [x.strip() for x in raw_excludes if x.strip()]
         
@@ -227,7 +219,7 @@ if st.button("Analyze & Explain", type="primary"):
                 results.append({"URL": url, "Main Entity": "Error", "Explanation": "Scrape Failed"})
                 continue
 
-            # 2. NLP Analysis (NOW DEDUPLICATED)
+            # 2. NLP Analysis
             main_ent, sub_ents = analyze_entities(text)
             
             if not main_ent:
@@ -239,19 +231,30 @@ if st.button("Analyze & Explain", type="primary"):
             
             formatted_subs = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_ents])
             
+            # --- CRITICAL FIX: SANITIZE GEMINI OUTPUT ---
+            # Ensure 'explanation' is always a String, never a List.
+            raw_expl = explanation_data.get("explanation", "")
+            if isinstance(raw_expl, list):
+                clean_expl = "\n".join([str(item) for item in raw_expl])
+            else:
+                clean_expl = str(raw_expl)
+
+            raw_ctx = explanation_data.get("context", "")
+            clean_ctx = str(raw_ctx)
+            # --------------------------------------------
+
             results.append({
                 "URL": url,
                 "Main Entity": f"{main_ent['name']} ({main_ent['score']:.2f})",
                 "Sub Entities": formatted_subs,
-                "Context": explanation_data.get("context"),
-                "Why it was picked": explanation_data.get("explanation")
+                "Context": clean_ctx,
+                "Why it was picked": clean_expl
             })
             
             progress.progress((i + 1) / len(urls))
             
         status.success("Done!")
         
-        # SAVE TO SESSION STATE
         st.session_state.results_df = pd.DataFrame(results)
 
 # --- RESULT DISPLAY BLOCK ---
