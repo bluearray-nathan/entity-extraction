@@ -14,6 +14,10 @@ import time
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Entity Interpreter", layout="wide")
 
+# HARDCODED MODEL VERSION (No dropdown)
+# You can change this to "gemini-1.5-pro" if you need deeper reasoning
+ACTIVE_GEMINI_MODEL = "gemini-2.5-flash"
+
 # --- 2. AUTHENTICATION & SETUP ---
 
 # A. Google Cloud NLP
@@ -65,7 +69,7 @@ def get_driver():
     driver = webdriver.Chrome(service=service, options=chrome_options)
     return driver
 
-# --- 3. SESSION STATE (The Fix for the Refresh Issue) ---
+# --- 3. SESSION STATE ---
 if 'results_df' not in st.session_state:
     st.session_state.results_df = None
 
@@ -79,6 +83,9 @@ def scrape_with_selenium(url, exclude_phrases=None):
         
         full_text = driver.find_element(By.TAG_NAME, "body").text
         
+        # CLEANING LOGIC:
+        # Replaces exact string matches with empty space.
+        # Does NOT use regex, so it is safe for specific phrases containing keywords.
         if exclude_phrases:
             for phrase in exclude_phrases:
                 phrase = phrase.strip()
@@ -106,7 +113,7 @@ def analyze_entities(text):
         st.error(f"NLP API Error: {e}")
         return None, []
 
-def get_gemini_explanation(url, main_entity, text_sample, model_name):
+def get_gemini_explanation(url, main_entity, text_sample):
     prompt = f"""
     You are an expert in Google's Natural Language Processing (NLP) API.
     
@@ -132,7 +139,7 @@ def get_gemini_explanation(url, main_entity, text_sample, model_name):
     """
     try:
         response = client.models.generate_content(
-            model=model_name, 
+            model=ACTIVE_GEMINI_MODEL, 
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -145,17 +152,17 @@ st.title("🧠 Entity Analysis Interpreter")
 
 with st.sidebar:
     st.header("⚙️ Settings")
-    model_options = ["gemini-1.5-flash"]
-    try:
-        if client:
-            m_list = client.models.list()
-            model_options = [m.name for m in m_list if "gemini" in m.name and "vision" not in m.name]
-            model_options.sort(reverse=True)
-    except: pass
-    selected_model = st.selectbox("Gemini Model", model_options)
+    st.info(f"Using Model: **{ACTIVE_GEMINI_MODEL}**")
+    
     st.divider()
-    st.subheader("🧹 Cleaner")
-    exclude_text = st.text_area("Phrases to Remove:", height=150)
+    st.subheader("🧹 Text to Remove")
+    st.caption("Paste specific navigation text or headers here. Separate different phrases with a comma (,).")
+    
+    exclude_text = st.text_area(
+        "Phrases to delete:", 
+        height=150,
+        placeholder="Breakdown Cover | RAC, Skip to content, Cookie Policy"
+    )
 
 urls_input = st.text_area("Enter URLs (one per line):", height=100)
 
@@ -165,7 +172,12 @@ if st.button("Analyze & Explain", type="primary"):
         st.warning("Enter a URL first.")
     else:
         urls = urls_input.strip().split('\n')
-        excludes = exclude_text.split('\n') if exclude_text else []
+        
+        # SPLIT BY COMMA as requested
+        # We also check if the user used newlines instead, just to be safe, 
+        # but primarily we split by comma.
+        raw_excludes = exclude_text.replace('\n', ',').split(',')
+        excludes = [x.strip() for x in raw_excludes if x.strip()]
         
         results = []
         progress = st.progress(0)
@@ -195,7 +207,7 @@ if st.button("Analyze & Explain", type="primary"):
                 continue
                 
             # 3. Gemini Interpretation
-            explanation_data = get_gemini_explanation(url, main_ent, text[:3000], selected_model)
+            explanation_data = get_gemini_explanation(url, main_ent, text[:3000])
             
             formatted_subs = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_ents])
             
@@ -215,7 +227,6 @@ if st.button("Analyze & Explain", type="primary"):
         st.session_state.results_df = pd.DataFrame(results)
 
 # --- RESULT DISPLAY BLOCK (Outside the button loop) ---
-# This checks if data exists in the "memory" of the app
 if st.session_state.results_df is not None:
     st.divider()
     
@@ -223,7 +234,6 @@ if st.session_state.results_df is not None:
     col1, col2 = st.columns([4, 1])
     
     with col2:
-        # Convert DF to CSV
         csv = st.session_state.results_df.to_csv(index=False).encode('utf-8')
         
         st.download_button(
