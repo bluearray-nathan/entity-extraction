@@ -1,16 +1,20 @@
 import streamlit as st
-import requests
-from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
 from google.cloud import language_v1
 from google.oauth2 import service_account
 from google import genai
 from google.genai import types
 import pandas as pd
 import json
+import time
 
-# --- 1. CONFIGURATION & AUTH ---
+# --- 1. AUTHENTICATION & SETUP ---
 
-# A. Google Cloud NLP API (Service Account)
+# A. Google Cloud NLP (Service Account)
 if "gcp_service_account" in st.secrets:
     try:
         service_account_info = dict(st.secrets["gcp_service_account"])
@@ -20,267 +24,203 @@ if "gcp_service_account" in st.secrets:
         st.error(f"Error loading GCP Credentials: {e}")
         st.stop()
 else:
-    st.error("GCP Credentials (gcp_service_account) not found in secrets.")
+    st.error("Missing 'gcp_service_account' in secrets.")
     st.stop()
 
-# B. Google Gemini API (API Key)
+# B. Gemini API
 client = None
 if "gemini_api_key" in st.secrets:
     try:
+        # Robust key extraction logic
         raw_secret = st.secrets["gemini_api_key"]
-        api_key_string = None
-        
-        # LOGIC: Extract key string
-        if isinstance(raw_secret, str):
-            api_key_string = raw_secret
-        else:
-            secret_dict = dict(raw_secret)
-            if "gemini_api_key" in secret_dict:
-                api_key_string = secret_dict["gemini_api_key"]
-            elif "api_key" in secret_dict:
-                api_key_string = secret_dict["api_key"]
-            else:
-                for v in secret_dict.values():
-                    if isinstance(v, str) and v.startswith("AIza"):
-                        api_key_string = v
-                        break
+        api_key_string = raw_secret if isinstance(raw_secret, str) else raw_secret.get("gemini_api_key") or raw_secret.get("api_key")
         
         if not api_key_string:
-            st.error("❌ Error: Found [gemini_api_key] but no valid string key inside.")
+            st.error("Found gemini_api_key but no valid string inside.")
             st.stop()
 
         client = genai.Client(api_key=api_key_string)
-        
     except Exception as e:
-        st.error(f"Error initializing Gemini: {e}")
+        st.error(f"Gemini Error: {e}")
         st.stop()
 else:
-    st.error("Gemini API Key (gemini_api_key) not found in secrets.")
+    st.error("Missing 'gemini_api_key' in secrets.")
     st.stop()
+
+# C. Selenium Browser Setup (Cached)
+@st.cache_resource
+def get_driver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    return driver
 
 # --- 2. CORE FUNCTIONS ---
 
-def scrape_body_text(url, exclude_selectors=None, exclude_phrases=None):
+def scrape_with_selenium(url, exclude_phrases=None):
     """
-    Scrapes visible text and supports TWO types of cleaning:
-    1. CSS Selectors (removes HTML tags before getting text)
-    2. Text Phrases (removes specific strings after getting text)
+    Uses Selenium to render JS, then scrapes text and cleans it.
     """
+    driver = None
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Referer': 'https://www.google.com/',
-            'Upgrade-Insecure-Requests': '1'
-        }
+        driver = get_driver()
+        driver.get(url)
         
-        session = requests.Session()
-        response = session.get(url, headers=headers, timeout=15)
+        # Optional: Add a small sleep to let JS finish loading (e.g., accordions)
+        time.sleep(2) 
         
-        if response.status_code == 403:
-            return "ERROR: Access Denied (403). The website blocked the scraper."
-        if response.status_code != 200:
-            return f"ERROR: Status Code {response.status_code}"
-
-        soup = BeautifulSoup(response.content, 'html.parser')
+        # Get the full text of the body
+        full_text = driver.find_element(By.TAG_NAME, "body").text
         
-        # 1. Standard Cleanup (Always remove these)
-        for element in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "iframe"]):
-            element.extract()
-
-        # 2. CSS Exclusion (Technical)
-        if exclude_selectors:
-            for selector in exclude_selectors:
-                selector = selector.strip()
-                if not selector: continue
-                try:
-                    found_elements = soup.select(selector)
-                    for el in found_elements:
-                        el.extract()
-                except Exception as e:
-                    print(f"Invalid selector '{selector}': {e}")
-            
-        # Get the raw text
-        text = soup.get_text(separator=' ')
-        
-        # 3. Text Phrase Exclusion (The "Black Box" approach)
+        # Clean specific phrases (The "Black Box" Cleaner)
         if exclude_phrases:
             for phrase in exclude_phrases:
                 phrase = phrase.strip()
                 if phrase:
-                    text = text.replace(phrase, "")
-
-        # Final whitespace cleanup
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        clean_text = ' '.join(chunk for chunk in chunks if chunk)
+                    full_text = full_text.replace(phrase, "")
         
-        # CHANGE IS HERE: Removed [:8000] limit. Sends EVERYTHING.
-        return clean_text 
+        return full_text.strip()
         
     except Exception as e:
         return f"ERROR: {str(e)}"
 
 def analyze_entities(text):
-    """Sends text to Google NLP API to get entities."""
+    """Google NLP Entity Extraction"""
     try:
-        document = language_v1.Document(content=text, type_=language_v1.Document.Type.PLAIN_TEXT)
+        # Truncate to 100kb just for the NLP API call to avoid 'Document Too Large' errors
+        # (This doesn't affect the Gemini audit, which gets full context later)
+        nlp_text = text[:100000] 
+        
+        document = language_v1.Document(content=nlp_text, type_=language_v1.Document.Type.PLAIN_TEXT)
         response = nlp_client.analyze_entities(request={'document': document})
         
         sorted_entities = sorted(response.entities, key=lambda x: x.salience, reverse=True)
+        if not sorted_entities: return None, []
         
-        if not sorted_entities:
-            return None, []
-        
-        main_entity = {
-            "name": sorted_entities[0].name,
-            "score": sorted_entities[0].salience
-        }
-        sub_entities = [e.name for e in sorted_entities[1:6]]
-        
-        return main_entity, sub_entities
+        main = {"name": sorted_entities[0].name, "score": sorted_entities[0].salience}
+        subs = [e.name for e in sorted_entities[1:10]] # Grab top 10 sub-entities
+        return main, subs
     except Exception as e:
-        st.error(f"🚨 Google NLP API Error: {e}")
+        st.error(f"NLP API Error: {e}")
         return None, []
 
-def llm_audit_gemini(url, main_entity_data, sub_entities, model_name):
-    """Asks Gemini to audit the entity alignment."""
-    
+def llm_audit_gemini(url, main_entity, sub_entities, model_name):
+    """Gemini Audit"""
     prompt = f"""
     You are a technical SEO Auditor.
     URL: {url}
-    Main Entity: "{main_entity_data['name']}" (Score: {main_entity_data['score']:.2f})
-    Sub-Entities: {", ".join(sub_entities)}
+    Main Entity Detected: "{main_entity['name']}" (Salience Score: {main_entity['score']:.2f})
+    Sub-Entities Detected: {", ".join(sub_entities)}
     
-    Task: Audit content focus.
+    Task: Audit if the content actually focuses on the user's search intent.
     
-    RULE: If 'Main Entity' is generic (e.g. 'Member', 'Login', 'Home', Brand Name), ignore it and check if Sub-Entities match the URL topic.
+    1. If Main Entity is generic (e.g. 'Home', 'Login', 'Cookies', Brand Name), ignore it.
+    2. Look at the Sub-Entities. Do they match the likely topic of the URL?
+    3. Is the content 'thin' or 'off-topic'?
     
-    Return ONLY JSON:
-    {{
-        "verdict": "Pass" or "Review Needed",
-        "reasoning": "Short explanation",
-        "recommendation": "Actionable tip"
-    }}
+    Return JSON: {{ "verdict": "Pass/Fail/Review", "reasoning": "...", "recommendation": "..." }}
     """
-    
     try:
         response = client.models.generate_content(
             model=model_name, 
             contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
+            config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         return json.loads(response.text)
     except Exception as e:
-        return {"verdict": "Error", "reasoning": str(e), "recommendation": "Check Model ID"}
+        return {"verdict": "Error", "reasoning": str(e), "recommendation": "Check Model"}
 
-# --- 3. STREAMLIT UI ---
-st.set_page_config(page_title="Entity Auditor", layout="wide")
+# --- 3. THE UI ---
+st.set_page_config(page_title="Selenium Entity Auditor", layout="wide")
+st.title("🚀 Selenium + Gemini Entity Auditor")
 
-st.title("🔹 Google NLP + Gemini Entity Auditor")
-
-# --- SIDEBAR SETTINGS ---
+# SIDEBAR
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("⚙️ Settings")
     
-    # Model Selector
-    available_models = ["gemini-1.5-flash"]
+    # Model Selection
+    model_options = ["gemini-1.5-flash"]
     try:
         if client:
-            models = client.models.list()
-            available_models = [m.name for m in models if "gemini" in m.name and "vision" not in m.name]
-            available_models.sort(reverse=True)
-    except:
-        pass
-    selected_model = st.selectbox("Select Gemini Model:", available_models, index=0)
-    
-    st.markdown("---")
-    st.subheader("🧹 Cleaning Tools")
-    
-    # Option 1: CSS Selectors (Technical)
-    exclude_input_css = st.text_input(
-        "Exclude CSS Selectors:", 
-        placeholder=".navbar, #cookie-banner",
-        help="Remove HTML elements by Class or ID."
-    )
-    
-    # Option 2: Text Phrases (Simple) -> ADDED THIS
-    st.markdown("**Exclude Specific Text:**")
-    exclude_input_text = st.text_area(
-        "Paste text phrases to remove (one per line):",
-        placeholder="Breakdown Cover | RAC\nSkip to content\nCookie Policy",
-        height=150,
-        help="Any text pasted here will be deleted from the page content before analysis."
-    )
+            m_list = client.models.list()
+            model_options = [m.name for m in m_list if "gemini" in m.name and "vision" not in m.name]
+            model_options.sort(reverse=True)
+    except: pass
+    selected_model = st.selectbox("Gemini Model", model_options)
 
-urls_input = st.text_area("Enter URLs (one per line):", height=150)
+    st.divider()
+    
+    # The Excluder Box
+    st.subheader("🧹 Cleaner")
+    st.info("Paste junk text here (headers, cookie banners) to remove it from analysis.")
+    exclude_text = st.text_area("Phrases to Remove:", height=150)
+
+# MAIN INPUT
+urls_input = st.text_area("Enter URLs (one per line):", height=100)
 
 if st.button("Run Audit", type="primary"):
     if not urls_input:
-        st.warning("Please enter at least one URL.")
+        st.warning("Enter a URL first.")
     else:
         urls = urls_input.strip().split('\n')
-        
-        # Parse user inputs
-        exclude_list_css = [x.strip() for x in exclude_input_css.split(',')] if exclude_input_css else []
-        exclude_list_text = exclude_input_text.split('\n') if exclude_input_text else []
+        # Prepare exclude list
+        excludes = exclude_text.split('\n') if exclude_text else []
         
         results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        progress = st.progress(0)
+        status = st.empty()
         
         for i, url in enumerate(urls):
             url = url.strip()
             if not url: continue
             
-            status_text.text(f"Processing: {url}")
+            status.text(f"Scraping with Selenium: {url}...")
             
-            # 1. Scrape (Passing BOTH exclusion lists)
-            text = scrape_body_text(url, exclude_selectors=exclude_list_css, exclude_phrases=exclude_list_text)
+            # 1. SCRAPE (Using Selenium now!)
+            text = scrape_with_selenium(url, exclude_phrases=excludes)
             
-            with st.expander(f"🕵️‍♂️ View Scraped Text for: {url}"):
-                if text and "ERROR" in text:
-                    st.error(text)
-                else:
-                    st.text(text[:2000] + "..." if len(text) > 2000 else text) # Show first 2000 chars in UI preview
+            # Show preview (Using text_area so it scrolls and doesn't cut off visually)
+            with st.expander(f"📄 View Scraped Text ({len(text)} chars)"):
+                st.text_area("Full Body Text", text, height=300)
             
-            if not text or "ERROR" in text:
-                results.append({"URL": url, "Status": "Scrape Blocked", "Verdict": "Fail", "Reasoning": text, "Action": "Check Headers"})
+            if "ERROR" in text or len(text) < 50:
+                results.append({"URL": url, "Verdict": "Fail", "Reasoning": "Scrape failed or empty", "Action": "Check URL"})
                 continue
+
+            # 2. ANALYZE
+            status.text(f"Analyzing entities for: {url}...")
+            main_ent, sub_ents = analyze_entities(text)
             
-            # 2. NLP
-            main_entity, sub_entities = analyze_entities(text)
-            if not main_entity:
-                results.append({"URL": url, "Status": "NLP Failed", "Verdict": "Fail", "Reasoning": "API Error", "Action": "Check API Console"})
+            if not main_ent:
+                results.append({"URL": url, "Verdict": "Error", "Reasoning": "No entities found", "Action": "Check content length"})
                 continue
-            
-            # 3. Gemini Audit
-            audit = llm_audit_gemini(url, main_entity, sub_entities, selected_model)
+                
+            # 3. AUDIT
+            audit = llm_audit_gemini(url, main_ent, sub_ents, selected_model)
             
             results.append({
                 "URL": url,
-                "Main Entity": f"{main_entity['name']}",
-                "Salience": f"{main_entity['score']:.2f}",
-                "Sub Entities": ", ".join(sub_entities),
+                "Main Entity": f"{main_ent['name']} ({main_ent['score']:.2f})",
                 "Verdict": audit.get("verdict"),
                 "Reasoning": audit.get("reasoning"),
                 "Action": audit.get("recommendation")
             })
             
-            progress_bar.progress((i + 1) / len(urls))
+            progress.progress((i + 1) / len(urls))
             
-        status_text.text("Audit Complete!")
-        progress_bar.empty()
+        status.success("Done!")
         
+        # Display Results
         df = pd.DataFrame(results)
-        if not df.empty:
-            def highlight_verdict(val):
-                color = 'red' if val in ["Review Needed", "Fail", "Error"] else 'green' if val == "Pass" else 'orange'
-                return f'color: {color}; font-weight: bold'
-            try:
-                st.dataframe(df.style.map(highlight_verdict, subset=['Verdict']), use_container_width=True)
-            except:
-                st.dataframe(df, use_container_width=True)
+        def color_verdict(val):
+            color = 'red' if val in ['Fail', 'Error'] else 'green' if val == 'Pass' else 'orange'
+            return f'color: {color}; font-weight: bold'
+            
+        st.dataframe(df.style.map(color_verdict, subset=['Verdict']), use_container_width=True)
 
