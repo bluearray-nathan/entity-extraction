@@ -3,24 +3,36 @@ import requests
 from bs4 import BeautifulSoup
 from google.cloud import language_v1
 from google.oauth2 import service_account
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import pandas as pd
 import json
 
 # --- 1. CONFIGURATION & AUTH ---
 
 # A. Google Cloud NLP API (Service Account)
+# This handles the Entity Extraction
 if "gcp_service_account" in st.secrets:
-    service_account_info = json.loads(st.secrets["gcp_service_account"])
-    credentials = service_account.Credentials.from_service_account_info(service_account_info)
-    nlp_client = language_v1.LanguageServiceClient(credentials=credentials)
+    try:
+        service_account_info = json.loads(st.secrets["gcp_service_account"])
+        credentials = service_account.Credentials.from_service_account_info(service_account_info)
+        nlp_client = language_v1.LanguageServiceClient(credentials=credentials)
+    except Exception as e:
+        st.error(f"Error loading GCP Credentials: {e}")
+        st.stop()
 else:
     st.error("GCP Credentials (gcp_service_account) not found in secrets.")
     st.stop()
 
 # B. Google Gemini API (API Key)
+# This handles the Auditing/Reasoning
 if "gemini_api_key" in st.secrets:
-    genai.configure(api_key=st.secrets["gemini_api_key"])
+    try:
+        # Initialize the new GenAI Client
+        client = genai.Client(api_key=st.secrets["gemini_api_key"])
+    except Exception as e:
+        st.error(f"Error initializing Gemini: {e}")
+        st.stop()
 else:
     st.error("Gemini API Key (gemini_api_key) not found in secrets.")
     st.stop()
@@ -32,10 +44,14 @@ def scrape_body_text(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code != 200:
+            return None
+
         soup = BeautifulSoup(response.content, 'html.parser')
         
         # Remove scripts, styles, etc.
-        for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
+        for script in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
             script.extract()
             
         text = soup.get_text(separator=' ')
@@ -72,14 +88,11 @@ def analyze_entities(text):
         
         return main_entity, sub_entities
     except Exception as e:
-        st.error(f"NLP API Error: {e}")
+        # st.error(f"NLP API Error: {e}") # Uncomment for debugging
         return None, []
 
 def llm_audit_gemini(url, main_entity_data, sub_entities):
-    """Asks Gemini to audit the entity alignment."""
-    
-    # We use Gemini 1.5 Flash for speed and efficiency
-    model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+    """Asks Gemini to audit the entity alignment using the new SDK."""
     
     prompt = f"""
     You are a technical SEO Auditor.
@@ -103,7 +116,14 @@ def llm_audit_gemini(url, main_entity_data, sub_entities):
     """
     
     try:
-        response = model.generate_content(prompt)
+        # UPDATED: New SDK syntax
+        response = client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
         return json.loads(response.text)
     except Exception as e:
         return {"verdict": "Error", "reasoning": str(e), "recommendation": "Check API"}
@@ -169,17 +189,23 @@ if st.button("Run Audit", type="primary"):
             progress_bar.progress((i + 1) / len(urls))
             
         status_text.text("Audit Complete!")
+        progress_bar.empty()
         
         # Display Results
         df = pd.DataFrame(results)
         
-        # Stylize the dataframe to highlight "Review Needed"
-        def highlight_verdict(val):
-            color = 'red' if val == "Review Needed" else 'green'
-            return f'color: {color}; font-weight: bold'
+        if not df.empty:
+            # Stylize the dataframe to highlight "Review Needed"
+            def highlight_verdict(val):
+                color = 'red' if val == "Review Needed" else 'green' if val == "Pass" else 'orange'
+                return f'color: {color}; font-weight: bold'
 
-        st.dataframe(df.style.map(highlight_verdict, subset=['Verdict']), use_container_width=True)
-
+            try:
+                st.dataframe(df.style.map(highlight_verdict, subset=['Verdict']), use_container_width=True)
+            except:
+                st.dataframe(df, use_container_width=True)
+        else:
+            st.warning("No valid results generated.")
 
 
 
