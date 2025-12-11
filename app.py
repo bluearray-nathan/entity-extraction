@@ -3,7 +3,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
+# Note: webdriver_manager is removed to prevent version conflicts
 from google.cloud import language_v1
 from google.oauth2 import service_account
 from google import genai
@@ -31,8 +31,8 @@ else:
 client = None
 if "gemini_api_key" in st.secrets:
     try:
-        # Robust key extraction logic
         raw_secret = st.secrets["gemini_api_key"]
+        # Robust key extraction
         api_key_string = raw_secret if isinstance(raw_secret, str) else raw_secret.get("gemini_api_key") or raw_secret.get("api_key")
         
         if not api_key_string:
@@ -47,7 +47,7 @@ else:
     st.error("Missing 'gemini_api_key' in secrets.")
     st.stop()
 
-# C. Selenium Browser Setup (Cached)
+# C. Selenium Browser Setup (Fixed for Cloud)
 @st.cache_resource
 def get_driver():
     chrome_options = Options()
@@ -57,7 +57,12 @@ def get_driver():
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     
-    service = Service(ChromeDriverManager().install())
+    # CRITICAL FIX: Explicitly use the system-installed binary
+    chrome_options.binary_location = "/usr/bin/chromium"
+
+    # CRITICAL FIX: Explicitly use the system-installed driver
+    service = Service("/usr/bin/chromedriver")
+    
     driver = webdriver.Chrome(service=service, options=chrome_options)
     return driver
 
@@ -67,18 +72,17 @@ def scrape_with_selenium(url, exclude_phrases=None):
     """
     Uses Selenium to render JS, then scrapes text and cleans it.
     """
-    driver = None
     try:
         driver = get_driver()
         driver.get(url)
         
-        # Optional: Add a small sleep to let JS finish loading (e.g., accordions)
+        # Small wait for JS to settle
         time.sleep(2) 
         
         # Get the full text of the body
         full_text = driver.find_element(By.TAG_NAME, "body").text
         
-        # Clean specific phrases (The "Black Box" Cleaner)
+        # The "Black Box" Cleaner
         if exclude_phrases:
             for phrase in exclude_phrases:
                 phrase = phrase.strip()
@@ -93,8 +97,7 @@ def scrape_with_selenium(url, exclude_phrases=None):
 def analyze_entities(text):
     """Google NLP Entity Extraction"""
     try:
-        # Truncate to 100kb just for the NLP API call to avoid 'Document Too Large' errors
-        # (This doesn't affect the Gemini audit, which gets full context later)
+        # Cap at 100k chars for NLP API safety
         nlp_text = text[:100000] 
         
         document = language_v1.Document(content=nlp_text, type_=language_v1.Document.Type.PLAIN_TEXT)
@@ -104,7 +107,7 @@ def analyze_entities(text):
         if not sorted_entities: return None, []
         
         main = {"name": sorted_entities[0].name, "score": sorted_entities[0].salience}
-        subs = [e.name for e in sorted_entities[1:10]] # Grab top 10 sub-entities
+        subs = [e.name for e in sorted_entities[1:10]] # Grab top 10
         return main, subs
     except Exception as e:
         st.error(f"NLP API Error: {e}")
@@ -182,10 +185,10 @@ if st.button("Run Audit", type="primary"):
             
             status.text(f"Scraping with Selenium: {url}...")
             
-            # 1. SCRAPE (Using Selenium now!)
+            # 1. SCRAPE
             text = scrape_with_selenium(url, exclude_phrases=excludes)
             
-            # Show preview (Using text_area so it scrolls and doesn't cut off visually)
+            # Show preview
             with st.expander(f"📄 View Scraped Text ({len(text)} chars)"):
                 st.text_area("Full Body Text", text, height=300)
             
