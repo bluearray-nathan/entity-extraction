@@ -1,0 +1,6 @@
+streamlit
+requests
+beautifulsoup4
+google-cloud-language
+google-generative-ai
+pandas
