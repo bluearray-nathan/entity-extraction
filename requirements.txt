@@ -1,6 +1,6 @@
 streamlit
-requests
-beautifulsoup4
 google-cloud-language
-google-generative-ai
+google-generative-ai>=0.8.0
 pandas
+beautifulsoup4
+requests
