@@ -131,7 +131,8 @@ def analyze_entities(text):
         
         return main_entity, sub_entities
     except Exception as e:
-        # st.error(f"NLP API Error: {e}") # Uncomment for debugging
+        # --- DEBUG: Show the actual error on screen ---
+        st.error(f"🚨 Google NLP API Error: {e}")
         return None, []
 
 def llm_audit_gemini(url, main_entity_data, sub_entities):
