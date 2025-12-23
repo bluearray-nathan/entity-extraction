@@ -13,7 +13,7 @@ import time
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Entity Alignment Optimizer", layout="wide")
-ACTIVE_GEMINI_MODEL = "gemini-2.0-flash"
+ACTIVE_GEMINI_MODEL = "gemini-2.5-flash"
 
 # --- 2. AUTHENTICATION & INITIALIZATION ---
 if 'manual_queue' not in st.session_state:
