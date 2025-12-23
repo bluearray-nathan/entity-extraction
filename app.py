@@ -10,10 +10,11 @@ from google.genai import types
 import pandas as pd
 import json
 import time
+import re
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Entity Alignment Optimizer", layout="wide")
-ACTIVE_GEMINI_MODEL = "gemini-2.5-flash"
+ACTIVE_GEMINI_MODEL = "gemini-2.0-flash"
 
 # --- 2. AUTHENTICATION & INITIALIZATION ---
 if 'manual_queue' not in st.session_state:
@@ -54,10 +55,15 @@ def get_driver():
 
 # --- 4. CORE FUNCTIONS ---
 def clean_output_text(text):
-    """Removes markdown bolding (**) and ensures clean string output."""
+    """Removes all markdown bolding and formatting artifacts."""
+    if not text: return "N/A"
     if isinstance(text, str):
-        return text.replace("**", "").strip()
-    return text
+        # Remove markdown bolding
+        text = text.replace("**", "")
+        # Remove any lingering backticks or weird artifacts
+        text = text.replace("```json", "").replace("```", "")
+        return text.strip()
+    return str(text)
 
 def scrape_with_selenium(url, exclude_phrases=None):
     try:
@@ -94,38 +100,48 @@ def analyze_entities(text):
 
 def get_gemini_optimization_advice(target_focus, main_entity, sub_entities, text_sample):
     sub_list = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_entities])
+    
     prompt = f"""
-    You are an SEO Entity Specialist. 
-    TARGET FOCUS: "{target_focus}"
-    GOOGLE NLP RESULT: Main Entity is "{main_entity['name']}" (Score: {main_entity['score']:.2f}).
-    SUB-ENTITIES: {sub_list}
-    
-    TASK:
-    1. Compare Target Focus vs NLP results. 
-    2. Alignment Status: (Matched / Partial / Mismatched)
-    3. Provide optimization advice and 2 specific copy changes.
-    
-    IMPORTANT: Do NOT use markdown bolding (**) in your response. 
-    Output JSON ONLY.
+    Compare this Target Focus: "{target_focus}" 
+    Against these Google NLP results: 
+    Main Entity: "{main_entity['name']}" (Score: {main_entity['score']:.2f})
+    Sub-Entities: {sub_list}
+
+    Provide advice to align the content better with the target.
+    Do NOT use any markdown bolding (**).
+    Text sample for context: {text_sample[:1000]}
     """
+    
     try:
         response = client.models.generate_content(
             model=ACTIVE_GEMINI_MODEL, 
             contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema={
+                    "type": "OBJECT",
+                    "properties": {
+                        "alignment_status": {"type": "STRING"},
+                        "optimization_advice": {"type": "STRING"},
+                        "actionable_examples": {"type": "STRING"}
+                    },
+                    "required": ["alignment_status", "optimization_advice", "actionable_examples"]
+                }
+            )
         )
         if response and response.text:
             return json.loads(response.text)
         return None
-    except:
+    except Exception as e:
+        # Debugging: st.write(f"API Error: {e}")
         return None
 
 # --- 5. THE UI ---
-st.title("🎯 Bulk Entity Optimizer (Clean View)")
+st.title("🎯 Bulk Entity Optimizer")
 
 with st.sidebar:
     st.header("⚙️ Global Settings")
-    exclude_text = st.text_area("Phrases to ignore (CSV):", placeholder="Login, Get a Quote, Yell.com")
+    exclude_text = st.text_area("Phrases to ignore (CSV):", placeholder="Login, Yell.com")
     st.divider()
     if st.button("🗑️ Reset All Data"):
         st.session_state.manual_queue = []
@@ -137,24 +153,24 @@ tab_manual, tab_auto = st.tabs(["📝 Bulk Manual Queue", "🌐 Automatic (URL L
 with tab_manual:
     col1, col2 = st.columns(2)
     with col1:
-        m_label = st.text_input("1. Page Label:", placeholder="e.g. Business Name")
+        m_label = st.text_input("1. Business Name:", placeholder="e.g. Acme Plumbers")
     with col2:
-        m_target = st.text_input("2. Target Focus:", placeholder="e.g. Roof Repairs")
+        m_target = st.text_input("2. Target Keyword:", placeholder="e.g. London Plumbers")
     
-    m_text = st.text_area("3. Paste content:", height=200, key="manual_input_area")
+    m_text = st.text_area("3. Paste Content:", height=200, key="manual_entry")
     
     if st.button("➕ Add to Queue"):
         if m_label and m_target and m_text:
             st.session_state.manual_queue.append({
                 "label": m_label, "target": m_target, "content": m_text, "type": "raw"
             })
-            st.success(f"Added {m_label}. Queue size: {len(st.session_state.manual_queue)}")
+            st.toast(f"Added {m_label}!")
         else:
-            st.warning("Complete all fields before adding.")
+            st.warning("Please fill out all fields.")
 
     if st.session_state.manual_queue:
         st.divider()
-        st.write("**Current Queue List**")
+        st.write(f"**Queue: {len(st.session_state.manual_queue)} items**")
         st.dataframe(pd.DataFrame(st.session_state.manual_queue)[["label", "target"]], use_container_width=True)
 
 with tab_auto:
@@ -170,18 +186,19 @@ if st.button("🚀 Run Analysis on All Items", type="primary"):
     final_inputs.extend(st.session_state.manual_queue)
 
     if not final_inputs:
-        st.warning("No pages to analyze.")
+        st.warning("Nothing to analyze.")
     else:
         results = []
         progress = st.progress(0)
-        status_text = st.empty()
+        status = st.empty()
         
         raw_excludes = exclude_text.replace('\n', ',').split(',')
         excludes = [x.strip() for x in raw_excludes if x.strip()]
         
         for i, item in enumerate(final_inputs):
-            status_text.text(f"Processing {i+1}/{len(final_inputs)}: {item['label']}")
+            status.text(f"Analyzing {i+1}/{len(final_inputs)}: {item['label']}")
             
+            # Scrape
             if item["type"] == "url":
                 text = scrape_with_selenium(item["value"], excludes)
             else:
@@ -189,47 +206,45 @@ if st.button("🚀 Run Analysis on All Items", type="primary"):
                 for p in excludes: 
                     if p: text = text.replace(p, "")
             
-            if "ERROR" in text or len(text) < 50:
-                results.append({"Source": item['label'], "Target": item['target'], "Main Entity": "Error", "Alignment": "N/A", "Advice": "Check source text."})
+            if len(text) < 50:
+                results.append({"Source": item['label'], "Target Focus": item['target'], "Main Entity (Score)": "Error", "Target Alignment": "No text found", "Optimization Advice": "N/A", "Actionable Examples": "N/A"})
                 continue
 
+            # NLP & Gemini
             main_ent, sub_ents = analyze_entities(text)
             if main_ent:
                 advice = get_gemini_optimization_advice(item['target'], main_ent, sub_ents, text)
-                if advice:
-                    results.append({
-                        "Source": item['label'],
-                        "Target Focus": item['target'],
-                        "Main Entity (Score)": f"{main_ent['name']} ({main_ent['score']:.2f})",
-                        "Target Alignment": clean_output_text(advice.get("alignment_status")),
-                        "Optimization Advice": clean_output_text(advice.get("optimization_advice")),
-                        "Actionable Examples": clean_output_text(advice.get("actionable_examples"))
-                    })
-                else:
-                    results.append({"Source": item['label'], "Target Focus": item['target'], "Main Entity (Score)": f"{main_ent['name']} ({main_ent['score']:.2f})", "Target Alignment": "API Error", "Optimization Advice": "Gemini failed to respond.", "Actionable Examples": "N/A"})
+                
+                # Double-check extraction even if JSON is slightly malformed
+                results.append({
+                    "Source": item['label'],
+                    "Target Focus": item['target'],
+                    "Main Entity (Score)": f"{main_ent['name']} ({main_ent['score']:.2f})",
+                    "Target Alignment": clean_output_text(advice.get("alignment_status")) if advice else "Processing Error",
+                    "Optimization Advice": clean_output_text(advice.get("optimization_advice")) if advice else "Check API limits or formatting",
+                    "Actionable Examples": clean_output_text(advice.get("actionable_examples")) if advice else "N/A"
+                })
             else:
-                results.append({"Source": item['label'], "Target Focus": item['target'], "Main Entity (Score)": "None", "Target Alignment": "N/A", "Optimization Advice": "No entities detected.", "Actionable Examples": "N/A"})
+                results.append({"Source": item['label'], "Target Focus": item['target'], "Main Entity (Score)": "None", "Target Alignment": "No Entities Found", "Optimization Advice": "N/A", "Actionable Examples": "N/A"})
             
             progress.progress((i + 1) / len(final_inputs))
             
         st.session_state.results_df = pd.DataFrame(results)
-        status_text.success(f"Successfully processed {len(final_inputs)} pages.")
+        status.success("All items processed!")
 
 # --- DISPLAY ---
 if st.session_state.results_df is not None:
     st.divider()
     csv = st.session_state.results_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download Clean CSV Report", data=csv, file_name="entity_analysis_clean.csv", mime="text/csv", use_container_width=True)
+    st.download_button("📥 Download Master CSV", data=csv, file_name="analysis.csv", mime="text/csv")
     
-    # Render with st.dataframe for the cleanest possible tabular view
     st.dataframe(st.session_state.results_df, use_container_width=True, hide_index=True)
     
-    # Render detailed view with plain text
     for _, row in st.session_state.results_df.iterrows():
         with st.expander(f"📋 Details: {row['Source']}"):
-            st.text(f"Target Focus: {row['Target Focus']}")
-            st.text(f"Main Entity: {row['Main Entity (Score)']}")
+            st.write(f"**Target:** {row['Target Focus']}")
+            st.write(f"**Main Entity:** {row['Main Entity (Score)']}")
             st.write("---")
-            st.text(f"Alignment: {row['Target Alignment']}")
-            st.write(f"Advice: {row['Optimization Advice']}")
-            st.write(f"Examples: {row['Actionable Examples']}")
+            st.write(f"**Alignment Status:** {row['Target Alignment']}")
+            st.write(f"**Strategy Advice:** {row['Optimization Advice']}")
+            st.write(f"**Implementation Examples:** {row['Actionable Examples']}")
