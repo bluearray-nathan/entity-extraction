@@ -58,9 +58,7 @@ def clean_output_text(text):
     """Removes all markdown bolding and formatting artifacts."""
     if not text: return "N/A"
     if isinstance(text, str):
-        # Remove markdown bolding
         text = text.replace("**", "")
-        # Remove any lingering backticks or weird artifacts
         text = text.replace("```json", "").replace("```", "")
         return text.strip()
     return str(text)
@@ -133,7 +131,6 @@ def get_gemini_optimization_advice(target_focus, main_entity, sub_entities, text
             return json.loads(response.text)
         return None
     except Exception as e:
-        # Debugging: st.write(f"API Error: {e}")
         return None
 
 # --- 5. THE UI ---
@@ -207,25 +204,28 @@ if st.button("🚀 Run Analysis on All Items", type="primary"):
                     if p: text = text.replace(p, "")
             
             if len(text) < 50:
-                results.append({"Source": item['label'], "Target Focus": item['target'], "Main Entity (Score)": "Error", "Target Alignment": "No text found", "Optimization Advice": "N/A", "Actionable Examples": "N/A"})
+                results.append({"Source": item['label'], "Target Focus": item['target'], "Main Entity (Score)": "Error", "Sub Entities": "N/A", "Target Alignment": "No text found", "Optimization Advice": "N/A", "Actionable Examples": "N/A"})
                 continue
 
             # NLP & Gemini
             main_ent, sub_ents = analyze_entities(text)
             if main_ent:
+                # Prepare sub-entities string for the dataframe
+                sub_ent_string = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_ents])
+                
                 advice = get_gemini_optimization_advice(item['target'], main_ent, sub_ents, text)
                 
-                # Double-check extraction even if JSON is slightly malformed
                 results.append({
                     "Source": item['label'],
                     "Target Focus": item['target'],
                     "Main Entity (Score)": f"{main_ent['name']} ({main_ent['score']:.2f})",
+                    "Sub Entities": sub_ent_string,
                     "Target Alignment": clean_output_text(advice.get("alignment_status")) if advice else "Processing Error",
-                    "Optimization Advice": clean_output_text(advice.get("optimization_advice")) if advice else "Check API limits or formatting",
+                    "Optimization Advice": clean_output_text(advice.get("optimization_advice")) if advice else "Check API limits",
                     "Actionable Examples": clean_output_text(advice.get("actionable_examples")) if advice else "N/A"
                 })
             else:
-                results.append({"Source": item['label'], "Target Focus": item['target'], "Main Entity (Score)": "None", "Target Alignment": "No Entities Found", "Optimization Advice": "N/A", "Actionable Examples": "N/A"})
+                results.append({"Source": item['label'], "Target Focus": item['target'], "Main Entity (Score)": "None", "Sub Entities": "None", "Target Alignment": "No Entities Found", "Optimization Advice": "N/A", "Actionable Examples": "N/A"})
             
             progress.progress((i + 1) / len(final_inputs))
             
@@ -236,7 +236,7 @@ if st.button("🚀 Run Analysis on All Items", type="primary"):
 if st.session_state.results_df is not None:
     st.divider()
     csv = st.session_state.results_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download Master CSV", data=csv, file_name="analysis.csv", mime="text/csv")
+    st.download_button("📥 Download Master CSV", data=csv, file_name="entity_analysis.csv", mime="text/csv")
     
     st.dataframe(st.session_state.results_df, use_container_width=True, hide_index=True)
     
@@ -244,6 +244,7 @@ if st.session_state.results_df is not None:
         with st.expander(f"📋 Details: {row['Source']}"):
             st.write(f"**Target:** {row['Target Focus']}")
             st.write(f"**Main Entity:** {row['Main Entity (Score)']}")
+            st.write(f"**Sub Entities:** {row['Sub Entities']}")
             st.write("---")
             st.write(f"**Alignment Status:** {row['Target Alignment']}")
             st.write(f"**Strategy Advice:** {row['Optimization Advice']}")
