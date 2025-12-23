@@ -12,8 +12,8 @@ import json
 import time
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="Entity Interpreter", layout="wide")
-ACTIVE_GEMINI_MODEL = "gemini-2.5-flash" # Updated to current stable version
+st.set_page_config(page_title="Entity Optimizer", layout="wide")
+ACTIVE_GEMINI_MODEL = "gemini-2.0-flash"
 
 # --- 2. AUTHENTICATION ---
 if "gcp_service_account" in st.secrets:
@@ -33,16 +33,10 @@ if "gemini_api_key" in st.secrets:
     try:
         raw_secret = st.secrets["gemini_api_key"]
         api_key_string = raw_secret if isinstance(raw_secret, str) else raw_secret.get("gemini_api_key") or raw_secret.get("api_key")
-        if not api_key_string:
-            st.error("Found gemini_api_key but no valid string inside.")
-            st.stop()
         client = genai.Client(api_key=api_key_string)
     except Exception as e:
         st.error(f"Gemini Error: {e}")
         st.stop()
-else:
-    st.error("Missing 'gemini_api_key' in secrets.")
-    st.stop()
 
 # --- 3. BROWSER SETUP ---
 @st.cache_resource
@@ -51,12 +45,9 @@ def get_driver():
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     chrome_options.binary_location = "/usr/bin/chromium"
     service = Service("/usr/bin/chromedriver")
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    return driver
+    return webdriver.Chrome(service=service, options=chrome_options)
 
 if 'results_df' not in st.session_state:
     st.session_state.results_df = None
@@ -66,13 +57,11 @@ def scrape_with_selenium(url, exclude_phrases=None):
     try:
         driver = get_driver()
         driver.get(url)
-        time.sleep(3) # Slightly increased for stability
+        time.sleep(3)
         full_text = driver.find_element(By.TAG_NAME, "body").text
         if exclude_phrases:
             for phrase in exclude_phrases:
-                phrase = phrase.strip()
-                if phrase:
-                    full_text = full_text.replace(phrase, "")
+                if phrase.strip(): full_text = full_text.replace(phrase.strip(), "")
         return full_text.strip()
     except Exception as e:
         return f"ERROR: {str(e)}"
@@ -83,34 +72,44 @@ def deduplicate_entities(entities):
         clean_name = e.name.lower().rstrip('s')
         if clean_name in merged:
             merged[clean_name]['score'] += e.salience
-            if e.name[0].isupper() and not merged[clean_name]['name'][0].isupper():
-                merged[clean_name]['name'] = e.name
         else:
             merged[clean_name] = {'name': e.name, 'score': e.salience}
     return sorted(merged.values(), key=lambda x: x['score'], reverse=True)
 
 def analyze_entities(text):
     try:
-        nlp_text = text[:100000]
-        document = language_v1.Document(content=nlp_text, type_=language_v1.Document.Type.PLAIN_TEXT)
+        document = language_v1.Document(content=text[:100000], type_=language_v1.Document.Type.PLAIN_TEXT)
         response = nlp_client.analyze_entities(request={'document': document})
-        cleaned_entities = deduplicate_entities(response.entities)
-        if not cleaned_entities: return None, []
-        main = {"name": cleaned_entities[0]['name'], "score": cleaned_entities[0]['score']}
-        subs = [{"name": e['name'], "score": e['score']} for e in cleaned_entities[1:10]]
-        return main, subs
+        cleaned = deduplicate_entities(response.entities)
+        if not cleaned: return None, []
+        return cleaned[0], cleaned[1:10]
     except Exception as e:
-        st.error(f"NLP API Error: {e}")
         return None, []
 
-def get_gemini_explanation(source_name, main_entity, text_sample):
+def get_gemini_optimization_advice(target_focus, main_entity, sub_entities, text_sample):
+    # Format sub-entities for the prompt
+    sub_list = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_entities])
+    
     prompt = f"""
-    You are an expert in Google's Natural Language Processing (NLP) API.
-    Data: Source: {source_name}, Main Entity: "{main_entity['name']}" (Score: {main_entity['score']:.2f}).
-    Text Start: "{text_sample}..."
-    Task: Explain WHY NLP chose "{main_entity['name']}".
-    Analyze: Grammatical Subject, Structure, Repetition.
-    Output JSON ONLY: {{ "context": "...", "explanation": "..." }}
+    You are an SEO Entity Specialist. 
+    USER TARGET FOCUS: "{target_focus}"
+    GOOGLE NLP RESULT: Main Entity is "{main_entity['name']}" (Salience: {main_entity['score']:.2f}).
+    SUB-ENTITIES FOUND: {sub_list}
+    
+    TASK: 
+    1. Compare the Target Focus to the NLP results. 
+    2. Does Google "get it"? (Yes/No/Partial)
+    3. Provide specific advice to align the page better with the Target Focus. 
+    4. Give 2-3 concrete examples of copy changes (e.g., "Change [Existing Sentence] to [Proposed Sentence]").
+    
+    TEXT SAMPLE FOR CONTEXT: "{text_sample[:1500]}"
+    
+    OUTPUT JSON ONLY:
+    {{
+      "alignment_status": "Status here",
+      "optimization_advice": "Your detailed analysis here",
+      "actionable_examples": "Specific copy changes here"
+    }}
     """
     try:
         response = client.models.generate_content(
@@ -120,107 +119,97 @@ def get_gemini_explanation(source_name, main_entity, text_sample):
         )
         return json.loads(response.text)
     except Exception as e:
-        return {"context": "Error", "explanation": str(e)}
+        return {"alignment_status": "Error", "optimization_advice": str(e), "actionable_examples": "N/A"}
 
 # --- 5. THE UI ---
-st.title("🧠 Entity Analysis Interpreter")
+st.title("🎯 Entity Alignment & Optimizer")
 
-with st.expander("ℹ️ Guide: How to understand these metrics", expanded=False):
-    st.markdown("""
-    ### 1. Main Entity & Salience Score
-    The **Main Entity** is the noun Google identifies as the core subject.
-    
-    * **High Score (> 0.20):** Strong topical focus.
-    * **Low Score (< 0.05):** Fragmented or diluted topic.
-    
-    ### 2. Manual Mode (Bypassing Blocks)
-    If a URL fails due to Cloudflare or bot protection, use the **Manual tab** to paste the text directly.
-    """)
-
-# SIDEBAR
+# SIDEBAR Settings
 with st.sidebar:
     st.header("⚙️ Settings")
-    st.info(f"Using Model: **{ACTIVE_GEMINI_MODEL}**")
+    exclude_text = st.text_area("Phrases to ignore (CSV):", placeholder="Login, Sign Up")
     st.divider()
-    st.subheader("🧹 Text to Remove")
-    st.caption("Common footer/nav text to ignore.")
-    exclude_text = st.text_area("Phrases to delete:", height=150, placeholder="Login, Sign Up, Cookie Policy")
+    st.info("This tool compares what you WANT the page to be about vs. what Google NLP ACTUALLY sees.")
 
-# --- TABS FOR INPUT ---
+# MAIN INPUTS
+target_focus = st.text_input("🎯 What is the main focus/topic of this page?", placeholder="e.g. Comprehensive Car Insurance for Seniors")
+
 tab_auto, tab_manual = st.tabs(["🌐 Automatic (URL)", "📝 Manual (Paste Content)"])
 input_items = []
 
 with tab_auto:
-    urls_input = st.text_area("Enter URLs (one per line):", height=150, key="auto_urls")
+    urls_input = st.text_area("Enter URLs (one per line):", height=100)
     if urls_input:
         for url in urls_input.strip().split('\n'):
-            if url.strip():
-                input_items.append({"type": "url", "value": url.strip(), "label": url.strip()})
+            if url.strip(): input_items.append({"type": "url", "value": url.strip(), "label": url.strip()})
 
 with tab_manual:
-    m_label = st.text_input("Label for this content:", placeholder="e.g., Competitor Homepage")
-    m_text = st.text_area("Paste text content here:", height=300)
-    if m_text:
-        input_items.append({"type": "raw", "value": m_text, "label": m_label or "Manual Entry"})
+    m_label = st.text_input("Label:", placeholder="Competitor Page A")
+    m_text = st.text_area("Paste text content:", height=200)
+    if m_text: input_items.append({"type": "raw", "value": m_text, "label": m_label or "Manual Entry"})
 
 # PROCESSING
-if st.button("Analyze & Explain", type="primary"):
-    if not input_items:
-        st.warning("Please provide a URL or paste some text content.")
+if st.button("Analyze Alignment", type="primary"):
+    if not target_focus:
+        st.error("Please enter the 'Target Focus' so the AI knows what to compare against.")
+    elif not input_items:
+        st.warning("Please provide a URL or paste text content.")
     else:
         results = []
         progress = st.progress(0)
-        status = st.empty()
         
         raw_excludes = exclude_text.replace('\n', ',').split(',')
         excludes = [x.strip() for x in raw_excludes if x.strip()]
         
         for i, item in enumerate(input_items):
-            status.text(f"Processing ({i+1}/{len(input_items)}): {item['label']}")
-            
-            # 1. Get Text
+            # 1. Scrape/Get Text
             if item["type"] == "url":
-                text = scrape_with_selenium(item["value"], exclude_phrases=excludes)
+                text = scrape_with_selenium(item["value"], excludes)
             else:
                 text = item["value"]
-                for phrase in excludes:
-                    if phrase: text = text.replace(phrase, "")
+                for p in excludes: 
+                    if p: text = text.replace(p, "")
             
-            # Preview
-            with st.expander(f"📄 Data Source: {item['label']}"):
-                st.text_area("Text Analyzed", text, height=150, key=f"text_{i}")
-
             if "ERROR" in text or len(text) < 50:
-                results.append({"Source": item['label'], "Main Entity": "Error", "Why it was picked": "Scrape failed or text too short."})
+                results.append({"Source": item['label'], "Main Entity": "Error", "Alignment": "N/A", "Advice": "Check Source Text"})
                 continue
 
-            # 2. Analyze
+            # 2. NLP Analysis
             main_ent, sub_ents = analyze_entities(text)
             if not main_ent:
-                results.append({"Source": item['label'], "Main Entity": "None", "Why it was picked": "No entities identified."})
+                results.append({"Source": item['label'], "Main Entity": "None", "Alignment": "N/A", "Advice": "No Entities Found"})
                 continue
             
-            # 3. Interpret
-            explanation_data = get_gemini_explanation(item['label'], main_ent, text[:3000])
-            formatted_subs = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_ents])
+            # 3. Gemini Advice
+            advice = get_gemini_optimization_advice(target_focus, main_ent, sub_ents, text)
             
             results.append({
                 "Source": item['label'],
-                "Main Entity": f"{main_ent['name']} ({main_ent['score']:.2f})",
-                "Sub Entities": formatted_subs,
-                "Context": str(explanation_data.get("context", "")),
-                "Why it was picked": str(explanation_data.get("explanation", ""))
+                "Main Entity (Score)": f"{main_ent['name']} ({main_ent['score']:.2f})",
+                "Target Alignment": advice.get("alignment_status"),
+                "Optimization Advice": advice.get("optimization_advice"),
+                "Actionable Examples": advice.get("actionable_examples")
             })
             progress.progress((i + 1) / len(input_items))
             
-        status.success("Analysis Complete!")
         st.session_state.results_df = pd.DataFrame(results)
 
 # DISPLAY
 if st.session_state.results_df is not None:
     st.divider()
-    col1, col2 = st.columns([4, 1])
-    with col2:
-        csv = st.session_state.results_df.to_csv(index=False).encode('utf-8')
-        st.download_button(label="📥 Download CSV", data=csv, file_name="entity_analysis.csv", mime="text/csv", use_container_width=True)
-    st.dataframe(st.session_state.results_df, use_container_width=True)
+    st.subheader("📊 Optimization Results")
+    
+    # Download Button
+    csv = st.session_state.results_df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Download Analysis", data=csv, file_name="entity_optimization.csv", mime="text/csv")
+    
+    # Custom Table Display
+    st.table(st.session_state.results_df)
+
+    # Individual Card View for better readability of long text
+    for index, row in st.session_state.results_df.iterrows():
+        with st.expander(f"🔍 Detailed View: {row['Source']}"):
+            st.write(f"**Main Entity:** {row['Main Entity (Score)']}")
+            st.write(f"**Alignment:** {row['Target Alignment']}")
+            st.info(f"**Advice:** {row['Optimization Advice']}")
+            st.success(f"**Examples:**\n{row['Actionable Examples']}")
