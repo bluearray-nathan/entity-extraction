@@ -97,7 +97,7 @@ def analyze_entities(text):
         return None, []
 
 def get_gemini_optimization_advice(target_focus, main_entity, sub_entities, text_sample):
-    sub_list = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_entities])
+    sub_list = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_entities]) if sub_entities else "None"
     
     prompt = f"""
     Compare this Target Focus: "{target_focus}" 
@@ -167,7 +167,7 @@ with tab_manual:
 
     if st.session_state.manual_queue:
         st.divider()
-        st.write(f"**Queue: {len(st.session_state.manual_queue)} items**")
+        st.write(f"**Queue Preview ({len(st.session_state.manual_queue)} items)**")
         st.dataframe(pd.DataFrame(st.session_state.manual_queue)[["label", "target"]], use_container_width=True)
 
 with tab_auto:
@@ -203,29 +203,50 @@ if st.button("🚀 Run Analysis on All Items", type="primary"):
                 for p in excludes: 
                     if p: text = text.replace(p, "")
             
-            if len(text) < 50:
-                results.append({"Source": item['label'], "Target Focus": item['target'], "Main Entity (Score)": "Error", "Sub Entities": "N/A", "Target Alignment": "No text found", "Optimization Advice": "N/A", "Actionable Examples": "N/A"})
+            # 1. Handle Content Error Path
+            if not text or len(text) < 50:
+                results.append({
+                    "Source": item['label'], 
+                    "Target Focus": item['target'], 
+                    "Main Entity (Score)": "Error", 
+                    "Sub Entities": "N/A", 
+                    "Target Alignment": "No text found", 
+                    "Optimization Advice": "N/A", 
+                    "Actionable Examples": "N/A"
+                })
+                progress.progress((i + 1) / len(final_inputs))
                 continue
 
-            # NLP & Gemini
+            # 2. NLP Analysis
             main_ent, sub_ents = analyze_entities(text)
-            if main_ent:
-                # Prepare sub-entities string for the dataframe
-                sub_ent_string = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_ents])
-                
-                advice = get_gemini_optimization_advice(item['target'], main_ent, sub_ents, text)
-                
+            
+            # 3. Handle NLP Error Path
+            if not main_ent:
                 results.append({
-                    "Source": item['label'],
-                    "Target Focus": item['target'],
-                    "Main Entity (Score)": f"{main_ent['name']} ({main_ent['score']:.2f})",
-                    "Sub Entities": sub_ent_string,
-                    "Target Alignment": clean_output_text(advice.get("alignment_status")) if advice else "Processing Error",
-                    "Optimization Advice": clean_output_text(advice.get("optimization_advice")) if advice else "Check API limits",
-                    "Actionable Examples": clean_output_text(advice.get("actionable_examples")) if advice else "N/A"
+                    "Source": item['label'], 
+                    "Target Focus": item['target'], 
+                    "Main Entity (Score)": "None", 
+                    "Sub Entities": "None", 
+                    "Target Alignment": "No Entities Found", 
+                    "Optimization Advice": "N/A", 
+                    "Actionable Examples": "N/A"
                 })
-            else:
-                results.append({"Source": item['label'], "Target Focus": item['target'], "Main Entity (Score)": "None", "Sub Entities": "None", "Target Alignment": "No Entities Found", "Optimization Advice": "N/A", "Actionable Examples": "N/A"})
+                progress.progress((i + 1) / len(final_inputs))
+                continue
+
+            # 4. Success Path
+            sub_ent_string = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_ents]) if sub_ents else "None Found"
+            advice = get_gemini_optimization_advice(item['target'], main_ent, sub_ents, text)
+            
+            results.append({
+                "Source": item['label'],
+                "Target Focus": item['target'],
+                "Main Entity (Score)": f"{main_ent['name']} ({main_ent['score']:.2f})",
+                "Sub Entities": sub_ent_string,
+                "Target Alignment": clean_output_text(advice.get("alignment_status")) if advice else "Processing Error",
+                "Optimization Advice": clean_output_text(advice.get("optimization_advice")) if advice else "Check API limits",
+                "Actionable Examples": clean_output_text(advice.get("actionable_examples")) if advice else "N/A"
+            })
             
             progress.progress((i + 1) / len(final_inputs))
             
