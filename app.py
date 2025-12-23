@@ -13,7 +13,7 @@ import time
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Entity Interpreter", layout="wide")
-ACTIVE_GEMINI_MODEL = "gemini-2.0-flash" # Updated to current stable version
+ACTIVE_GEMINI_MODEL = "gemini-2.5-flash" # Updated to current stable version
 
 # --- 2. AUTHENTICATION ---
 if "gcp_service_account" in st.secrets:
