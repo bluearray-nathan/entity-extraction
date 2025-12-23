@@ -90,14 +90,14 @@ def get_gemini_optimization_advice(target_focus, main_entity, sub_entities, text
     sub_list = ", ".join([f"{s['name']} ({s['score']:.2f})" for s in sub_entities])
     prompt = f"""
     You are an SEO Entity Specialist. 
-    TARGET FOCUS: "{target_focus}"
+    SPECIFIC TARGET FOCUS FOR THIS PAGE: "{target_focus}"
     GOOGLE NLP RESULT: Main Entity is "{main_entity['name']}" (Score: {main_entity['score']:.2f}).
     SUB-ENTITIES: {sub_list}
     
     TASK:
-    1. Compare Target Focus vs NLP results. 
+    1. Compare the provided Target Focus vs the NLP results. 
     2. Alignment Status: (Matched / Partial / Mismatched)
-    3. Provide optimization advice and 2 specific copy changes.
+    3. Provide optimization advice and 2 specific copy changes to make the page more about the target focus.
     
     OUTPUT JSON ONLY:
     {{
@@ -117,7 +117,7 @@ def get_gemini_optimization_advice(target_focus, main_entity, sub_entities, text
         return {"alignment_status": "Error", "optimization_advice": "Failed to generate.", "actionable_examples": "N/A"}
 
 # --- 5. THE UI ---
-st.title("🎯 Bulk Entity Optimizer")
+st.title("🎯 Bulk Entity Optimizer (Individual Targets)")
 
 with st.sidebar:
     st.header("⚙️ Global Settings")
@@ -128,45 +128,57 @@ with st.sidebar:
         st.session_state.results_df = None
         st.rerun()
 
-target_focus = st.text_input("🎯 Target Focus for all pages:", placeholder="e.g. Local Plumber in London")
-
-tab_auto, tab_manual = st.tabs(["🌐 Automatic (URL List)", "📝 Bulk Manual Queue"])
-
-with tab_auto:
-    urls_input = st.text_area("Enter URLs (one per line):", height=100)
+# --- TABS ---
+tab_manual, tab_auto = st.tabs(["📝 Bulk Manual Queue", "🌐 Automatic (URL List)"])
 
 with tab_manual:
-    col_l, col_r = st.columns([1, 2])
-    with col_l:
-        m_label = st.text_input("Page Label:", placeholder="e.g. Yell Page 1")
-        if st.button("➕ Add to Queue"):
-            if m_label and "manual_text_input" in st.session_state and st.session_state.manual_text_input:
-                st.session_state.manual_queue.append({"label": m_label, "content": st.session_state.manual_text_input})
-                st.success(f"Added {m_label}. Queue size: {len(st.session_state.manual_queue)}")
-            else:
-                st.warning("Please provide a label and content.")
-    with col_r:
-        st.text_area("Paste page content:", height=200, key="manual_text_input")
+    st.subheader("Add Pages to Queue")
+    col1, col2 = st.columns(2)
+    with col1:
+        m_label = st.text_input("1. Page Label (Business Name):", placeholder="e.g. Smith & Co Plumbers")
+    with col2:
+        m_target = st.text_input("2. Target Focus for THIS page:", placeholder="e.g. Emergency Boiler Repair")
     
+    m_text = st.text_area("3. Paste page content:", height=200)
+    
+    if st.button("➕ Add to Analysis Queue"):
+        if m_label and m_target and m_text:
+            st.session_state.manual_queue.append({
+                "label": m_label, 
+                "target": m_target, 
+                "content": m_text,
+                "type": "raw"
+            })
+            st.success(f"Added '{m_label}' with target '{m_target}'. Total: {len(st.session_state.manual_queue)}")
+        else:
+            st.warning("Please fill in the Label, Target, and Content.")
+
     if st.session_state.manual_queue:
-        st.write(f"**Items in Queue ({len(st.session_state.manual_queue)})**")
-        st.caption(", ".join([x['label'] for x in st.session_state.manual_queue]))
+        st.divider()
+        st.write(f"**Current Queue ({len(st.session_state.manual_queue)})**")
+        queue_df = pd.DataFrame(st.session_state.manual_queue)[["label", "target"]]
+        st.table(queue_df)
+
+with tab_auto:
+    st.info("Note: All URLs in this list will share the SAME target focus entered below.")
+    auto_target = st.text_input("Global Target for URLs:", placeholder="e.g. Plumbers London")
+    urls_input = st.text_area("Enter URLs (one per line):", height=150)
 
 # --- PROCESSING ---
 if st.button("🚀 Run Analysis on All Items", type="primary"):
     final_inputs = []
     
-    if urls_input:
+    # Process Auto URLs
+    if urls_input and auto_target:
         for url in urls_input.strip().split('\n'):
-            if url.strip(): final_inputs.append({"type": "url", "value": url.strip(), "label": url.strip()})
+            if url.strip(): 
+                final_inputs.append({"type": "url", "value": url.strip(), "label": url.strip(), "target": auto_target})
     
-    for item in st.session_state.manual_queue:
-        final_inputs.append({"type": "raw", "value": item['content'], "label": item['label']})
+    # Process Manual Queue
+    final_inputs.extend(st.session_state.manual_queue)
 
-    if not target_focus:
-        st.error("Please set a Target Focus.")
-    elif not final_inputs:
-        st.warning("No data to process.")
+    if not final_inputs:
+        st.warning("No data in queue to process.")
     else:
         results = []
         progress = st.progress(0)
@@ -182,27 +194,40 @@ if st.button("🚀 Run Analysis on All Items", type="primary"):
             if item["type"] == "url":
                 text = scrape_with_selenium(item["value"], excludes)
             else:
-                text = item["value"]
+                text = item["content"]
                 for p in excludes: 
                     if p: text = text.replace(p, "")
             
             if "ERROR" in text or len(text) < 50:
-                results.append({"Source": item['label'], "Main Entity": "Error", "Alignment": "N/A", "Advice": "Check source text."})
+                results.append({
+                    "Source": item['label'], 
+                    "Target Focus": item['target'], 
+                    "Main Entity": "Error", 
+                    "Alignment": "N/A", 
+                    "Advice": "Check source text."
+                })
                 continue
 
             # 2. NLP & Gemini
             main_ent, sub_ents = analyze_entities(text)
             if main_ent:
-                advice = get_gemini_optimization_advice(target_focus, main_ent, sub_ents, text)
+                advice = get_gemini_optimization_advice(item['target'], main_ent, sub_ents, text)
                 results.append({
                     "Source": item['label'],
+                    "Target Focus": item['target'],
                     "Main Entity (Score)": f"{main_ent['name']} ({main_ent['score']:.2f})",
                     "Target Alignment": advice.get("alignment_status"),
                     "Optimization Advice": advice.get("optimization_advice"),
                     "Actionable Examples": advice.get("actionable_examples")
                 })
             else:
-                results.append({"Source": item['label'], "Main Entity": "None", "Alignment": "N/A", "Advice": "No entities found."})
+                results.append({
+                    "Source": item['label'], 
+                    "Target Focus": item['target'], 
+                    "Main Entity": "None", 
+                    "Alignment": "N/A", 
+                    "Advice": "No entities found."
+                })
             
             progress.progress((i + 1) / len(final_inputs))
             
@@ -212,13 +237,16 @@ if st.button("🚀 Run Analysis on All Items", type="primary"):
 # --- DISPLAY ---
 if st.session_state.results_df is not None:
     st.divider()
+    # Summary Table
+    st.subheader("Final Report")
     csv = st.session_state.results_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Download Master CSV Report", data=csv, file_name="bulk_entity_analysis.csv", mime="text/csv", use_container_width=True)
+    st.download_button("📥 Download Master CSV Report", data=csv, file_name="bulk_entity_analysis.csv", mime="text/csv")
     
     st.dataframe(st.session_state.results_df, use_container_width=True)
     
+    # Detailed recommendations
     for _, row in st.session_state.results_df.iterrows():
-        with st.expander(f"📄 Detailed Recommendations: {row['Source']}"):
-            st.write(f"**Alignment:** {row['Target Alignment']}")
-            st.info(f"**Advice:** {row['Optimization Advice']}")
-            st.success(f"**Examples:**\n{row['Actionable Examples']}")
+        with st.expander(f"📄 Details: {row['Source']} (Target: {row['Target Focus']})"):
+            st.write(f"**AI Alignment Check:** {row['Target Alignment']}")
+            st.info(f"**Optimization Strategy:** {row['Optimization Advice']}")
+            st.success(f"**Copywriting Examples:**\n{row['Actionable Examples']}")
